@@ -2,10 +2,10 @@
 
 import os
 import pytest
-from exasolchat.core import ExasolChat, QueryResult
-from exasolchat.llm import LLMBackend, LLMResponse
-from exasolchat.rag import NoopRAGMemory
-from exasolchat.safety import RiskLevel
+from exachat.core import ExasolChat, QueryResult
+from exachat.llm import LLMBackend, LLMResponse
+from exachat.rag import NoopRAGMemory
+from exachat.safety import RiskLevel
 
 
 class MockLLM(LLMBackend):
@@ -121,7 +121,7 @@ def test_context_manager(db_path):
 
 
 def test_manual_train(db_path):
-    from exasolchat.rag import RAGMemory
+    from exachat.rag import RAGMemory
     rag = NoopRAGMemory()
     chat = _make_chat(db_path, rag_enabled=False)
     # Should not raise even with noop
@@ -157,7 +157,7 @@ class TestDuckDBConnection:
         return path
 
     def _make_duck_chat(self, duck_path, llm=None, **kwargs):
-        from exasolchat.connection import ConnectionConfig
+        from exachat.connection import ConnectionConfig
         config = ConnectionConfig.duckdb(path=duck_path)
         return ExasolChat(
             connection=config,
@@ -214,13 +214,13 @@ class TestDuckDBConnection:
         chat.close()
 
     def test_duckdb_url_parsing(self):
-        from exasolchat.connection import ConnectionConfig
+        from exachat.connection import ConnectionConfig
         config = ConnectionConfig.from_url("duckdb:///tmp/data.duckdb")
         assert config.is_duckdb
         assert config.duckdb_path == "/tmp/data.duckdb"
 
     def test_duckdb_memory_url(self):
-        from exasolchat.connection import ConnectionConfig
+        from exachat.connection import ConnectionConfig
         config = ConnectionConfig.from_url("duckdb://:memory:")
         assert config.is_duckdb
         assert config.duckdb_path == ":memory:"

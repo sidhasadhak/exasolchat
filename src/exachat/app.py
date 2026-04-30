@@ -7,17 +7,17 @@ import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
 
-from exasolchat.core import ExasolChat, QueryResult
-from exasolchat.connection import ConnectionConfig
-from exasolchat.llm import OllamaBackend, OpenAICompatibleBackend
-from exasolchat.rag import RAGMemory, NoopRAGMemory
-from exasolchat.safety import RiskLevel
+from exachat.core import ExasolChat, QueryResult
+from exachat.connection import ConnectionConfig
+from exachat.llm import OllamaBackend, OpenAICompatibleBackend
+from exachat.rag import RAGMemory, NoopRAGMemory
+from exachat.safety import RiskLevel
 
 load_dotenv()
 
-_DEFAULT_DUCKDB_PATH = os.environ.get("EXASOLCHAT_DUCKDB_PATH", "")
-_DEFAULT_OLLAMA_URL  = os.environ.get("EXASOLCHAT_OLLAMA_URL", "http://localhost:11434")
-_DEFAULT_OLLAMA_MODEL = os.environ.get("EXASOLCHAT_OLLAMA_MODEL", "qwen2.5-coder:7b")
+_DEFAULT_DUCKDB_PATH = os.environ.get("EXACHAT_DUCKDB_PATH", "")
+_DEFAULT_OLLAMA_URL  = os.environ.get("EXACHAT_OLLAMA_URL", "http://localhost:11434")
+_DEFAULT_OLLAMA_MODEL = os.environ.get("EXACHAT_OLLAMA_MODEL", "qwen2.5-coder:7b")
 
 
 # ── Page config ──────────────────────────────────────────────────────
@@ -231,7 +231,7 @@ with st.sidebar:
             placeholder="/path/to/data.duckdb or :memory:",
             help=(
                 "Path to a .duckdb file, or :memory: for in-memory.\n"
-                "Set EXASOLCHAT_DUCKDB_PATH in a .env file to pre-fill this."
+                "Set EXACHAT_DUCKDB_PATH in a .env file to pre-fill this."
             ),
         )
         duck_schema = st.text_input("Schema", value="main", help="DuckDB schema (default: main)")
@@ -424,7 +424,7 @@ if not st.session_state.connected:
     with col1:
         st.markdown("#### Python API")
         st.code(
-            'from exasolchat import ExasolChat\n\n'
+            'from exachat import ExasolChat\n\n'
             'chat = ExasolChat(\n'
             '    "exa+pyexasol://user:pass@host:8563/SCHEMA"\n'
             ')\n'
@@ -435,7 +435,7 @@ if not st.session_state.connected:
     with col2:
         st.markdown("#### DuckDB")
         st.code(
-            'from exasolchat import ExasolChat\n\n'
+            'from exachat import ExasolChat\n\n'
             '# Local .duckdb file\n'
             'chat = ExasolChat("duckdb:///data.duckdb")\n\n'
             '# Or with bare path\n'
@@ -447,9 +447,9 @@ if not st.session_state.connected:
         st.markdown("#### CLI")
         st.code(
             '# Install\n'
-            'pip install exasolchat\n\n'
+            'pip install exachat\n\n'
             '# Launch\n'
-            'exasolchat',
+            'exachat',
             language="bash",
         )
     st.stop()

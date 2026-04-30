@@ -13,12 +13,12 @@ from typing import Optional
 
 import pandas as pd
 
-from exasolchat.charts import auto_chart
-from exasolchat.connection import ConnectionConfig, DatabaseConnection
-from exasolchat.llm import LLMBackend, LLMResponse, OllamaBackend
-from exasolchat.rag import NoopRAGMemory, RAGMemory
-from exasolchat.safety import RiskLevel, SafetyVerdict, sanitize_sql, validate_sql
-from exasolchat.schema import (
+from exachat.charts import auto_chart
+from exachat.connection import ConnectionConfig, DatabaseConnection
+from exachat.llm import LLMBackend, LLMResponse, OllamaBackend
+from exachat.rag import NoopRAGMemory, RAGMemory
+from exachat.safety import RiskLevel, SafetyVerdict, sanitize_sql, validate_sql
+from exachat.schema import (
     SchemaContext,
     introspect_duckdb,
     introspect_exasol,
@@ -55,7 +55,7 @@ class ExasolChat:
         print(result.data)
 
     Or with explicit config:
-        from exasolchat.connection import ConnectionConfig
+        from exachat.connection import ConnectionConfig
         config = ConnectionConfig.exasol("host:8563", "user", "pass", "MY_SCHEMA")
         chat = ExasolChat(config)
     """

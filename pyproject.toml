@@ -3,14 +3,14 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "exasolchat"
-version = "0.1.1"
-description = "Safe text-to-SQL for ExasolDB (and others) with local LLMs, RAG memory, and interactive charts."
+name = "exachat"
+version = "0.2.0"
+description = "Ask your database anything — safe text-to-SQL with local LLMs, RAG memory, and interactive charts."
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.9"
-authors = [{name = "exasolchat contributors"}]
-keywords = ["sql", "exasol", "llm", "text-to-sql", "streamlit", "ollama", "rag"]
+authors = [{name = "exachat contributors"}]
+keywords = ["sql", "duckdb", "exasol", "llm", "text-to-sql", "streamlit", "ollama", "rag", "local-llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
@@ -41,7 +41,7 @@ all = ["psycopg2-binary>=2.9", "pymysql>=1.1"]
 dev = ["pytest>=7.0", "ruff>=0.1"]
 
 [project.scripts]
-exasolchat = "exasolchat.cli:main"
+exachat = "exachat.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

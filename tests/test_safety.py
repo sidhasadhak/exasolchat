@@ -1,7 +1,7 @@
 """Tests for SQL safety validation — the most critical module."""
 
 import pytest
-from exasolchat.safety import RiskLevel, validate_sql, sanitize_sql
+from exachat.safety import RiskLevel, validate_sql, sanitize_sql
 
 
 class TestSafeQueries:

@@ -3,7 +3,7 @@
 Stores successful question→SQL pairs in ChromaDB and retrieves semantically
 similar ones to inject as few-shot examples into LLM prompts.
 
-Persists to ~/.exasolchat/rag/ by default.
+Persists to ~/.exachat/rag/ by default.
 """
 
 from __future__ import annotations
@@ -43,12 +43,12 @@ class RAGMemory:
     def __init__(
         self,
         persist_dir: Optional[str] = None,
-        collection_name: str = "exasolchat_rag",
+        collection_name: str = "exachat_rag",
         n_results: int = 3,
     ):
         self._n_results = n_results
         self._persist_dir = persist_dir or str(
-            Path.home() / ".exasolchat" / "rag"
+            Path.home() / ".exachat" / "rag"
         )
         Path(self._persist_dir).mkdir(parents=True, exist_ok=True)
 
