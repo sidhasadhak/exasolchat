@@ -97,14 +97,6 @@ def _render_chart(result: QueryResult):
 
 def _render_result(r: QueryResult):
     """Render a QueryResult in a chat message."""
-    # Safety badge
-    if r.safety.level == RiskLevel.SAFE:
-        badge = '<span class="badge-safe">✓ Safe</span>'
-    elif r.safety.level == RiskLevel.SUSPICIOUS:
-        badge = f'<span class="badge-warn">⚠ {r.safety.reason}</span>'
-    else:
-        badge = f'<span class="badge-blocked">✕ Blocked: {r.safety.reason}</span>'
-
     # Error
     if r.error:
         st.error(r.error)
@@ -117,12 +109,18 @@ def _render_result(r: QueryResult):
     if r.summary:
         st.markdown(r.summary)
 
-    # SQL expander with safety badge
-    with st.expander("SQL  " + badge, expanded=False):
+    # SQL expander — badge rendered inside, not in the label
+    with st.expander("Generated SQL", expanded=False):
+        if r.safety.level == RiskLevel.SAFE:
+            badge = '<span class="badge-safe">✓ Safe</span>'
+        elif r.safety.level == RiskLevel.SUSPICIOUS:
+            badge = f'<span class="badge-warn">⚠ {r.safety.reason}</span>'
+        else:
+            badge = f'<span class="badge-blocked">✕ Blocked: {r.safety.reason}</span>'
+        st.markdown(badge, unsafe_allow_html=True)
         st.code(r.sql, language="sql")
         if r.explanation:
             st.caption(r.explanation)
-        # RAG indicator
         if r.rag_examples_used > 0:
             st.markdown(
                 f'<div class="rag-indicator">📚 Used {r.rag_examples_used} '
