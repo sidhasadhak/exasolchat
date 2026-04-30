@@ -140,13 +140,14 @@ def _render_result(r: QueryResult):
             height=min(400, 35 * len(r.data) + 50),
         )
 
-        # Download
+        # Download — key must be unique per result to avoid duplicate element ID error
         col1, col2 = st.columns([1, 5])
         with col1:
             csv = r.data.to_csv(index=False)
             st.download_button(
                 "📥 CSV", csv, "query_result.csv", "text/csv",
                 use_container_width=True,
+                key=f"dl_{hash(r.question)}",
             )
 
 
