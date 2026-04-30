@@ -55,11 +55,23 @@ class RAGMemory:
         import chromadb
         self._client = chromadb.PersistentClient(path=self._persist_dir)
         self._ef = _BagOfWordsEF()
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=self._ef,
-            metadata={"hnsw:space": "cosine"},
-        )
+        try:
+            self._collection = self._client.get_or_create_collection(
+                name=collection_name,
+                embedding_function=self._ef,
+                metadata={"hnsw:space": "cosine"},
+            )
+        except Exception as e:
+            if "conflict" in str(e).lower() or "embedding function" in str(e).lower():
+                # Stale collection from a different embedding function — recreate it.
+                self._client.delete_collection(name=collection_name)
+                self._collection = self._client.create_collection(
+                    name=collection_name,
+                    embedding_function=self._ef,
+                    metadata={"hnsw:space": "cosine"},
+                )
+            else:
+                raise
 
     def add(self, question: str, sql: str) -> None:
         """Store a question→SQL pair. Deduplicates by question hash."""
