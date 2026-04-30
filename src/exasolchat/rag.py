@@ -20,8 +20,10 @@ class _BagOfWordsEF:
     Uses hashed token counts projected into a fixed-dim vector, L2-normalised.
     Good enough for SQL Q&A retrieval; zero external dependencies.
     """
-    name = "bag-of-words"
     DIM = 512
+
+    def name(self) -> str:
+        return "bag-of-words"
 
     def __call__(self, input: list[str]) -> list[list[float]]:
         return [self._embed(text) for text in input]
