@@ -1,7 +1,6 @@
 """LLM backends for text-to-SQL generation.
 
 Supports Ollama (default) and any OpenAI-compatible API (LM Studio, vLLM, etc.).
-Prompts are RAG-aware: they include relevant past Q&A pairs when available.
 """
 
 from __future__ import annotations
@@ -39,6 +38,14 @@ class LLMBackend(ABC):
 
     @abstractmethod
     def suggest_chart(self, question: str, columns: list[str], row_count: int) -> dict:
+        ...
+
+    @abstractmethod
+    def suggest_followups(self, question: str, sql: str, data_preview: str) -> list[str]:
+        ...
+
+    @abstractmethod
+    def generate_explore_questions(self, schema_prompt: str, profile: str) -> list[str]:
         ...
 
     _DUCKDB_DIALECT_HINTS = """
@@ -125,6 +132,31 @@ Results (first rows):
 
 Write a concise natural-language summary. Be specific with numbers. 2-3 sentences max."""
 
+    def _build_followups_prompt(self, question: str, sql: str, data_preview: str) -> str:
+        return f"""A business analyst asked: "{question}"
+
+SQL executed:
+{sql}
+
+Result preview:
+{data_preview}
+
+Suggest 3 specific, actionable follow-up questions they would naturally ask next — drilling deeper, comparing, or exploring anomalies in this data.
+Return ONLY a JSON array of 3 strings. No markdown, no explanation.
+["Question 1?", "Question 2?", "Question 3?"]"""
+
+    def _build_explore_prompt(self, schema_prompt: str, profile: str) -> str:
+        return f"""You are a data analyst. Given the database schema and data profile below, generate 5 insightful business questions a user would want to explore first.
+
+{schema_prompt}
+
+DATA PROFILE:
+{profile}
+
+Make questions specific, business-relevant, and varied — cover trends, top/bottom rankings, comparisons, and anomalies.
+Return ONLY a JSON array of 5 strings. No markdown, no explanation.
+["Question 1?", "Question 2?", "Question 3?", "Question 4?", "Question 5?"]"""
+
     def _build_chart_prompt(self, question: str, columns: list[str], row_count: int) -> str:
         return f"""Given a query result with columns {columns} and {row_count} rows,
 for the question "{question}", suggest the best chart type.
@@ -138,6 +170,19 @@ Respond with ONLY a JSON object (no markdown fences, no explanation):
   "title": "Chart Title"
 }}
 Use "table_only" if the data isn't well-suited for charting (e.g., single row, text-heavy)."""
+
+    def _extract_json_list(self, text: str) -> list[str]:
+        """Extract a JSON string array from LLM output."""
+        try:
+            cleaned = re.sub(r"```json\s*|\s*```", "", text).strip()
+            match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+            if match:
+                result = json.loads(match.group(0))
+                if isinstance(result, list):
+                    return [str(s) for s in result if s]
+        except Exception:
+            pass
+        return []
 
     def _extract_sql(self, text: str) -> str:
         """Extract SQL from LLM response."""
@@ -202,6 +247,14 @@ class OllamaBackend(LLMBackend):
         except (json.JSONDecodeError, KeyError):
             return {"chart_type": "table_only"}
 
+    def suggest_followups(self, question: str, sql: str, data_preview: str) -> list[str]:
+        raw = self._chat(self._build_followups_prompt(question, sql, data_preview), 0.4)
+        return self._extract_json_list(raw)
+
+    def generate_explore_questions(self, schema_prompt: str, profile: str) -> list[str]:
+        raw = self._chat(self._build_explore_prompt(schema_prompt, profile), 0.4)
+        return self._extract_json_list(raw)
+
 
 class OpenAICompatibleBackend(LLMBackend):
     """Any OpenAI-compatible API (LM Studio, vLLM, text-gen-webui, LocalAI, etc.)."""
@@ -252,3 +305,11 @@ class OpenAICompatibleBackend(LLMBackend):
             return json.loads(cleaned)
         except (json.JSONDecodeError, KeyError):
             return {"chart_type": "table_only"}
+
+    def suggest_followups(self, question: str, sql: str, data_preview: str) -> list[str]:
+        raw = self._chat(self._build_followups_prompt(question, sql, data_preview), 0.4)
+        return self._extract_json_list(raw)
+
+    def generate_explore_questions(self, schema_prompt: str, profile: str) -> list[str]:
+        raw = self._chat(self._build_explore_prompt(schema_prompt, profile), 0.4)
+        return self._extract_json_list(raw)

@@ -75,6 +75,19 @@ st.markdown("""
     .schema-table-name { font-weight: 600; font-size: 0.9rem; color: #f97316; }
     .schema-row-count  { font-size: 0.75rem; color: #6b7280; }
 
+    /* Follow-up suggestion pills */
+    div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
+        background: rgba(249, 115, 22, 0.08) !important;
+        border: 1px solid rgba(249, 115, 22, 0.3) !important;
+        color: #f97316 !important;
+        border-radius: 20px !important;
+        font-size: 0.82rem !important;
+        padding: 4px 14px !important;
+    }
+    div[data-testid="stHorizontalBlock"] button[kind="secondary"]:hover {
+        background: rgba(249, 115, 22, 0.15) !important;
+    }
+
     .stButton > button[kind="primary"] { background: #f97316; border: none; }
     .stButton > button[kind="primary"]:hover { background: #ea6c0a; }
 </style>
@@ -88,6 +101,10 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "connected" not in st.session_state:
     st.session_state.connected = False
+if "explore_questions" not in st.session_state:
+    st.session_state.explore_questions = []
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
 
 _VIZ_KEYWORDS = {"chart", "graph", "plot", "visuali", "diagram", "bar", "line", "pie", "scatter", "trend"}
 
@@ -163,6 +180,19 @@ def _render_result(r: QueryResult):
                 use_container_width=True,
                 key=f"dl_{key}",
             )
+
+    # Follow-up suggestions
+    if r.followups:
+        st.markdown(
+            '<div style="font-size:0.75rem;color:#6b7280;margin-top:12px;margin-bottom:4px;">💡 Suggested follow-ups</div>',
+            unsafe_allow_html=True,
+        )
+        cols = st.columns(len(r.followups))
+        for i, (col, q) in enumerate(zip(cols, r.followups)):
+            with col:
+                if st.button(q, key=f"fu_{key}_{i}", use_container_width=True):
+                    st.session_state.pending_question = q
+                    st.rerun()
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────
@@ -311,6 +341,11 @@ with st.sidebar:
             st.session_state.chat = chat
             st.session_state.connected = True
             st.session_state.messages = []
+            st.session_state.pending_question = None
+
+            with st.spinner("Generating starter questions..."):
+                st.session_state.explore_questions = chat.generate_explore_questions()
+
             st.success(
                 f"Connected! {len(chat.schema_context.tables)} tables "
                 f"({chat.schema_context.dialect})"
@@ -327,6 +362,7 @@ with st.sidebar:
                          help="Keep connection, clear conversation"):
                 st.session_state.chat.clear_history()
                 st.session_state.messages = []
+                st.session_state.pending_question = None
                 st.rerun()
         with col_dc:
             if st.button("🔌 Disconnect", use_container_width=True,
@@ -412,6 +448,21 @@ if not st.session_state.connected:
 # ── Chat interface ───────────────────────────────────────────────────
 chat_engine: ExasolChat = st.session_state.chat
 
+# Explore question grid — shown only before the first message
+if not st.session_state.messages and st.session_state.explore_questions:
+    st.markdown("#### Where do you want to start?")
+    eq = st.session_state.explore_questions
+    row1, row2 = eq[:3], eq[3:]
+    for row in [row1, row2]:
+        cols = st.columns(len(row))
+        for col, q in zip(cols, row):
+            with col:
+                if st.button(q, use_container_width=True, key=f"eq_{hash(q)}"):
+                    st.session_state.pending_question = q
+                    st.rerun()
+    st.divider()
+
+# Render conversation history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         if msg["role"] == "user":
@@ -421,7 +472,15 @@ for msg in st.session_state.messages:
         else:
             st.markdown(msg.get("content", ""))
 
-if question := st.chat_input("Ask a question about your data..."):
+# Handle pending question (from follow-up or explore button click)
+pending = st.session_state.get("pending_question")
+if pending:
+    st.session_state.pending_question = None
+
+typed = st.chat_input("Ask a question about your data...")
+question = typed or pending
+
+if question:
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)

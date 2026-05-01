@@ -40,10 +40,13 @@ class QueryResult:
     explanation: Optional[str] = None
     kb_patterns_used: int = 0
     column_warnings: list[str] = None
+    followups: list[str] = None
 
     def __post_init__(self):
         if self.column_warnings is None:
             self.column_warnings = []
+        if self.followups is None:
+            self.followups = []
 
 
 class ExasolChat:
@@ -217,6 +220,14 @@ class ExasolChat:
             except Exception:
                 chart_config = {"chart_type": "table_only"}
 
+        # 7. Suggest follow-up questions based on this result
+        followups = []
+        try:
+            preview = df.head(5).to_string(index=False)
+            followups = self.llm.suggest_followups(question, sql, preview)
+        except Exception:
+            pass
+
         result = QueryResult(
             question=question, sql=sql, safety=verdict,
             data=df, summary=summary,
@@ -224,9 +235,50 @@ class ExasolChat:
             explanation=llm_resp.explanation,
             kb_patterns_used=len(kb_patterns),
             column_warnings=column_warnings,
+            followups=followups,
         )
         self._history.append(result)
         return result
+
+    def generate_explore_questions(self) -> list[str]:
+        """Generate 5 starter questions based on schema + data profile."""
+        try:
+            profile = self._build_profile()
+            return self.llm.generate_explore_questions(self.schema_prompt, profile)
+        except Exception:
+            return []
+
+    def _build_profile(self) -> str:
+        """Build a data profile string for the LLM to generate explore questions."""
+        lines = []
+        for table in self.schema_context.tables[:4]:
+            row_count = table.row_count or "?"
+            lines.append(f"\nTable: {table.name} ({row_count} rows)")
+
+            if self._db.is_duckdb:
+                try:
+                    df = self._db.duckdb_conn.execute(
+                        f'SELECT * FROM (SUMMARIZE "{table.name}") LIMIT 30'
+                    ).df()
+                    for _, row in df.iterrows():
+                        col = row.get("column_name", "")
+                        ctype = row.get("column_type", "")
+                        mn = row.get("min", "")
+                        mx = row.get("max", "")
+                        unique = row.get("approx_unique", "")
+                        nulls = row.get("null_percentage", "")
+                        lines.append(
+                            f"  - {col} ({ctype}): min={mn}, max={mx}, "
+                            f"~{unique} unique, {nulls}% null"
+                        )
+                    continue
+                except Exception:
+                    pass
+
+            for col in table.columns[:12]:
+                lines.append(f"  - {col.name}: {col.type}")
+
+        return "\n".join(lines)
 
     def clear_history(self) -> None:
         """Clear session conversation history (for new chat)."""
