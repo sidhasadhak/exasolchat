@@ -1,0 +1,26 @@
+{
+  "id": "exists_filtering",
+  "title": "Existence-based filtering instead of joins",
+  "intent_tags": [
+    "filtering",
+    "joins",
+    "correctness"
+  ],
+  "sql_features": [
+    "exists",
+    "subquery"
+  ],
+  "difficulty": "advanced",
+  "pattern_type": "analytical",
+  "template": "WHERE EXISTS (SELECT 1 FROM b WHERE b.key = a.key AND condition)",
+  "when_to_use": [
+    "conditional inclusion",
+    "avoiding row duplication"
+  ],
+  "anti_patterns": [
+    "join + where condition causing duplication"
+  ],
+  "related_patterns": [
+    "cte_multi"
+  ]
+}

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "pivot",
+    "title": "Pivot table",
+    "intent_tags": [
+      "reshape"
+    ],
+    "sql_features": [
+      "pivot"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "transformation",
+    "template": "PIVOT(...)",
+    "when_to_use": [
+      "wide format"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  },
+  {
+    "id": "unpivot",
+    "title": "Unpivot",
+    "intent_tags": [
+      "normalize"
+    ],
+    "sql_features": [
+      "unpivot"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "transformation",
+    "template": "UNPIVOT(...)",
+    "when_to_use": [
+      "long format"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  }
+]

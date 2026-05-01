@@ -1,0 +1,24 @@
+{
+  "id": "safe_division",
+  "title": "Safe division to prevent null/zero errors",
+  "intent_tags": [
+    "robustness",
+    "production_sql"
+  ],
+  "sql_features": [
+    "nullif",
+    "aggregation"
+  ],
+  "difficulty": "beginner",
+  "pattern_type": "utility",
+  "template": "SUM(a) / NULLIF(SUM(b),0)",
+  "when_to_use": [
+    "ratios",
+    "profit margins",
+    "KPIs"
+  ],
+  "anti_patterns": [
+    "direct division without null handling"
+  ],
+  "related_patterns": []
+}

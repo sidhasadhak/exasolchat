@@ -82,8 +82,6 @@ _BLOCKED_PATTERNS: list[tuple[str, str]] = [
 # ── Suspicious patterns: execute with warning ────────────────────────
 _SUSPICIOUS_PATTERNS: list[tuple[str, str]] = [
     (r"\bUNION\s+(ALL\s+)?SELECT\b", "UNION injection pattern"),
-    (r"--\s*$", "trailing SQL comment"),
-    (r"/\*.*?\*/", "block comment"),
     (r"\bOR\s+1\s*=\s*1\b", "tautology (OR 1=1)"),
     (r"\bOR\s+['\"].*?['\"]\s*=\s*['\"]", "string tautology injection"),
     (r"\bINFORMATION_SCHEMA\b", "information_schema access"),
@@ -175,7 +173,17 @@ def _check_object_access(
 
 
 def sanitize_sql(sql: str) -> str:
-    """Light cleanup without changing semantics."""
+    """Strip comments and normalize whitespace without changing semantics.
+
+    Order matters: strip comments before collapsing whitespace, otherwise a
+    single-line -- comment eats everything that follows on the same line after
+    newlines are collapsed.
+    """
     sql = sql.strip().rstrip(";").strip()
-    sql = re.sub(r"\s+", " ", sql)
-    return sql
+    # Remove /* ... */ block comments
+    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+    # Remove -- single-line comments (to end of line, preserving the newline)
+    sql = re.sub(r"--[^\n]*", "", sql)
+    # Normalize: strip each line, drop blank lines, rejoin
+    lines = [ln.strip() for ln in sql.splitlines() if ln.strip()]
+    return "\n".join(lines)

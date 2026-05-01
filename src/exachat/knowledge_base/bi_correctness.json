@@ -1,0 +1,23 @@
+{
+  "id": "bi_correctness_checklist",
+  "title": "Analytical SQL validation checklist",
+  "intent_tags": [
+    "validation",
+    "debugging",
+    "bi_reasoning"
+  ],
+  "sql_features": [],
+  "difficulty": "advanced",
+  "pattern_type": "reasoning",
+  "template": "Check: grain correctness \u2192 join safety \u2192 null safety \u2192 time logic \u2192 aggregation validity",
+  "when_to_use": [
+    "final query validation"
+  ],
+  "anti_patterns": [
+    "trusting syntactically valid but logically wrong SQL"
+  ],
+  "related_patterns": [
+    "grain_order_level",
+    "safe_division"
+  ]
+}

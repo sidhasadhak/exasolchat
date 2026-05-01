@@ -1,0 +1,26 @@
+{
+  "id": "window_trend_lag",
+  "title": "Trend detection using LAG window function",
+  "intent_tags": [
+    "time_series",
+    "trend",
+    "window_functions"
+  ],
+  "sql_features": [
+    "lag",
+    "window_function"
+  ],
+  "difficulty": "advanced",
+  "pattern_type": "analytical",
+  "template": "LAG(metric) OVER (PARTITION BY key ORDER BY date)",
+  "when_to_use": [
+    "monthly trends",
+    "performance tracking"
+  ],
+  "anti_patterns": [
+    "comparing unordered aggregates"
+  ],
+  "related_patterns": [
+    "cte_multi"
+  ]
+}

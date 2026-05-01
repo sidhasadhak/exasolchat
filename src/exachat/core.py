@@ -1,8 +1,8 @@
 """Core ExasolChat engine.
 
-Connects schema introspection, LLM generation, RAG memory, safety
-validation, query execution, and chart suggestion into a single
-`.ask()` interface.
+Connects schema introspection, LLM generation, knowledge base retrieval,
+safety validation, query execution, and chart suggestion into a single
+.ask() interface.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import pandas as pd
 
 from exachat.charts import auto_chart
 from exachat.connection import ConnectionConfig, DatabaseConnection
+from exachat.kb import KnowledgeBase
 from exachat.llm import LLMBackend, LLMResponse, OllamaBackend
-from exachat.rag import NoopRAGMemory, RAGMemory
 from exachat.safety import RiskLevel, SafetyVerdict, sanitize_sql, validate_sql
 from exachat.schema import (
     SchemaContext,
@@ -38,8 +38,8 @@ class QueryResult:
     chart_obj: Optional[object] = None  # ("plotly", fig) or ("altair", chart)
     error: Optional[str] = None
     explanation: Optional[str] = None
-    rag_examples_used: int = 0
-    column_warnings: list[str] = None  # ambiguous column name hints
+    kb_patterns_used: int = 0
+    column_warnings: list[str] = None
 
     def __post_init__(self):
         if self.column_warnings is None:
@@ -50,14 +50,9 @@ class ExasolChat:
     """Main interface. Connect a database + LLM, ask questions, get answers.
 
     Usage:
-        chat = ExasolChat("exa+pyexasol://user:pass@host:8563/schema")
+        chat = ExasolChat("duckdb:///data.duckdb")
         result = chat.ask("What are the top 10 customers by revenue?")
         print(result.data)
-
-    Or with explicit config:
-        from exachat.connection import ConnectionConfig
-        config = ConnectionConfig.exasol("host:8563", "user", "pass", "MY_SCHEMA")
-        chat = ExasolChat(config)
     """
 
     def __init__(
@@ -71,8 +66,7 @@ class ExasolChat:
         allowed_tables: Optional[list[str]] = None,
         extra_context: str = "",
         max_rows: int = 5000,
-        rag: Optional[RAGMemory] = None,
-        rag_enabled: bool = True,
+        kb_path: Optional[str] = None,
         chart_library: str = "auto",
     ):
         # Connection
@@ -93,13 +87,10 @@ class ExasolChat:
         self._allowed_schemas = set(allowed_schemas) if allowed_schemas else None
         self._allowed_tables = set(allowed_tables) if allowed_tables else None
 
-        # RAG memory
-        if rag_enabled and rag is None:
-            self.rag = RAGMemory()
-        elif rag is not None:
-            self.rag = rag
-        else:
-            self.rag = NoopRAGMemory()
+        # Knowledge base (built-ins always loaded; extra dir optional)
+        self.kb = KnowledgeBase()
+        if kb_path:
+            self.kb.load_dir(kb_path)
 
         # Schema introspection
         if self._db.is_exasol:
@@ -147,25 +138,30 @@ class ExasolChat:
     def ask(self, question: str) -> QueryResult:
         """Ask a natural language question. Returns SQL + data + chart."""
 
-        # 1. RAG retrieval — find similar past queries
-        rag_examples = []
-        rag_prompt = None
+        # 1. KB retrieval — find relevant SQL patterns
+        kb_patterns = []
+        kb_context = None
         try:
-            rag_examples = self.rag.search(question)
-            if rag_examples:
-                rag_prompt = self.rag.format_for_prompt(rag_examples)
+            kb_patterns = self.kb.search(question)
+            if kb_patterns:
+                dialect = self.schema_context.dialect or ""
+                kb_context = self.kb.format_for_prompt(kb_patterns, dialect=dialect)
         except Exception:
-            pass  # RAG failure should never block a query
+            pass  # KB failure should never block a query
 
-        # 2. LLM generates SQL
+        # 2. LLM generates SQL — include recent session history for follow-up resolution
+        recent_history = [
+            {"question": r.question, "sql": r.sql}
+            for r in self._history[-3:]
+            if r.sql and not r.error
+        ]
         try:
             llm_resp: LLMResponse = self.llm.generate_sql(
-                self.schema_prompt, question, rag_prompt,
+                self.schema_prompt, question, kb_context,
+                history=recent_history or None,
             )
         except Exception as e:
-            return self._error_result(
-                question, "", f"LLM generation failed: {e}"
-            )
+            return self._error_result(question, "", f"LLM generation failed: {e}")
 
         sql = sanitize_sql(llm_resp.sql)
         column_warnings = _check_column_ambiguity(sql, self.schema_context)
@@ -181,7 +177,7 @@ class ExasolChat:
                 question=question, sql=sql, safety=verdict,
                 error=f"Query blocked: {verdict.reason}",
                 explanation=llm_resp.explanation,
-                rag_examples_used=len(rag_examples),
+                kb_patterns_used=len(kb_patterns),
                 column_warnings=column_warnings,
             )
             self._history.append(result)
@@ -195,7 +191,7 @@ class ExasolChat:
                 question=question, sql=sql, safety=verdict,
                 error=f"Query execution failed: {e}",
                 explanation=llm_resp.explanation,
-                rag_examples_used=len(rag_examples),
+                kb_patterns_used=len(kb_patterns),
                 column_warnings=column_warnings,
             )
             self._history.append(result)
@@ -221,26 +217,20 @@ class ExasolChat:
             except Exception:
                 chart_config = {"chart_type": "table_only"}
 
-        # 7. Store in RAG memory (only if query succeeded)
-        try:
-            self.rag.add(question, sql)
-        except Exception:
-            pass  # RAG write failure should never surface
-
         result = QueryResult(
             question=question, sql=sql, safety=verdict,
             data=df, summary=summary,
             chart_config=chart_config, chart_obj=chart_obj,
             explanation=llm_resp.explanation,
-            rag_examples_used=len(rag_examples),
+            kb_patterns_used=len(kb_patterns),
             column_warnings=column_warnings,
         )
         self._history.append(result)
         return result
 
-    def train(self, question: str, sql: str) -> None:
-        """Manually add a Q&A pair to RAG memory."""
-        self.rag.add(question, sql)
+    def clear_history(self) -> None:
+        """Clear session conversation history (for new chat)."""
+        self._history.clear()
 
     def close(self):
         """Close database connection."""
@@ -263,19 +253,14 @@ class ExasolChat:
 
 
 def _normalise(name: str) -> str:
-    """Normalise a column name for fuzzy comparison: lowercase, strip spaces/underscores."""
     return re.sub(r"[\s_]+", "", name.lower())
 
 
 def _check_column_ambiguity(sql: str, schema: "SchemaContext") -> list[str]:
-    """Detect column names in SQL that fuzzy-match schema columns but don't match exactly.
-
-    Returns warning strings like: "Did you mean 'Order Date'? (used as 'order_date')"
-    """
+    """Detect column names in SQL that fuzzy-match schema columns but don't match exactly."""
     all_cols = {c.name for t in schema.tables for c in t.columns}
     norm_to_exact: dict[str, str] = {_normalise(c): c for c in all_cols}
 
-    # Extract bare identifiers and quoted identifiers from SQL
     tokens = set(re.findall(r'"([^"]+)"|([A-Za-z_]\w*)', sql))
     used_names = {q or u for q, u in tokens if (q or u)}
 
@@ -290,7 +275,7 @@ def _check_column_ambiguity(sql: str, schema: "SchemaContext") -> list[str]:
                             "CAST", "INTERVAL", "DATE", "TIMESTAMP", "TRUE", "FALSE"):
             continue
         if name in all_cols:
-            continue  # exact match — fine
+            continue
         norm = _normalise(name)
         if norm in norm_to_exact:
             exact = norm_to_exact[norm]

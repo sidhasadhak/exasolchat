@@ -1,0 +1,40 @@
+[
+  {
+    "id": "perf_index",
+    "title": "Index usage",
+    "intent_tags": [
+      "performance"
+    ],
+    "sql_features": [
+      "index"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "optimization",
+    "template": "CREATE INDEX ...",
+    "when_to_use": [
+      "speed up queries"
+    ],
+    "anti_patterns": [
+      "over indexing"
+    ],
+    "related_patterns": []
+  },
+  {
+    "id": "perf_explain",
+    "title": "Explain plan",
+    "intent_tags": [
+      "debug"
+    ],
+    "sql_features": [
+      "explain"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "optimization",
+    "template": "EXPLAIN ANALYZE",
+    "when_to_use": [
+      "optimize"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  }
+]

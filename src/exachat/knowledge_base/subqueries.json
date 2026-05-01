@@ -1,0 +1,40 @@
+[
+  {
+    "id": "subquery_scalar",
+    "title": "Scalar subquery",
+    "intent_tags": [
+      "filter"
+    ],
+    "sql_features": [
+      "subquery"
+    ],
+    "difficulty": "beginner",
+    "pattern_type": "filtering",
+    "template": "WHERE col = (SELECT ...)",
+    "when_to_use": [
+      "single value"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  },
+  {
+    "id": "subquery_correlated",
+    "title": "Correlated subquery",
+    "intent_tags": [
+      "rowwise"
+    ],
+    "sql_features": [
+      "subquery"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "analytical",
+    "template": "WHERE EXISTS (SELECT 1 FROM B WHERE B.x=A.x)",
+    "when_to_use": [
+      "row comparisons"
+    ],
+    "anti_patterns": [
+      "slow"
+    ],
+    "related_patterns": []
+  }
+]

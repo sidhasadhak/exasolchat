@@ -1,0 +1,25 @@
+{
+  "id": "analytical_pipeline_cte",
+  "title": "Multi-stage analytical decomposition using CTEs",
+  "intent_tags": [
+    "pipeline",
+    "complex_queries",
+    "decomposition"
+  ],
+  "sql_features": [
+    "cte"
+  ],
+  "difficulty": "intermediate",
+  "pattern_type": "architectural",
+  "template": "WITH base AS (...), metrics AS (...), filtered AS (...), final AS (...) SELECT ...",
+  "when_to_use": [
+    "multi-condition analytics",
+    "BI reporting queries"
+  ],
+  "anti_patterns": [
+    "monolithic queries with mixed logic"
+  ],
+  "related_patterns": [
+    "cte_multi"
+  ]
+}

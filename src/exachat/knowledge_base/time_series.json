@@ -1,0 +1,38 @@
+[
+  {
+    "id": "ts_session",
+    "title": "Sessionization",
+    "intent_tags": [
+      "sessions"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "analytical",
+    "template": "CASE WHEN t - LAG(t) > interval THEN 1",
+    "when_to_use": [
+      "user sessions"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  },
+  {
+    "id": "ts_cohort",
+    "title": "Cohort retention",
+    "intent_tags": [
+      "cohort"
+    ],
+    "sql_features": [
+      "cte"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "analytical",
+    "template": "cohort grouping",
+    "when_to_use": [
+      "retention"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  }
+]

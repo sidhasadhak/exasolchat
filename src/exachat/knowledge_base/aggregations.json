@@ -1,0 +1,58 @@
+[
+  {
+    "id": "agg_group_by",
+    "title": "Group aggregation",
+    "intent_tags": [
+      "aggregation"
+    ],
+    "sql_features": [
+      "group_by"
+    ],
+    "difficulty": "beginner",
+    "pattern_type": "aggregation",
+    "template": "GROUP BY col",
+    "when_to_use": [
+      "summaries"
+    ],
+    "anti_patterns": [
+      "missing group cols"
+    ],
+    "related_patterns": []
+  },
+  {
+    "id": "agg_rollup",
+    "title": "ROLLUP",
+    "intent_tags": [
+      "hierarchy"
+    ],
+    "sql_features": [
+      "group_by"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "aggregation",
+    "template": "GROUP BY ROLLUP(a,b)",
+    "when_to_use": [
+      "subtotals"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  },
+  {
+    "id": "agg_cube",
+    "title": "CUBE",
+    "intent_tags": [
+      "multi_dimensional"
+    ],
+    "sql_features": [
+      "group_by"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "aggregation",
+    "template": "GROUP BY CUBE(a,b)",
+    "when_to_use": [
+      "OLAP"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  }
+]

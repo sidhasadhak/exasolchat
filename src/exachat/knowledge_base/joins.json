@@ -1,0 +1,79 @@
+[
+  {
+    "id": "join_inner",
+    "title": "Inner join",
+    "intent_tags": [
+      "join"
+    ],
+    "sql_features": [
+      "join"
+    ],
+    "difficulty": "beginner",
+    "pattern_type": "relational",
+    "template": "A JOIN B ON ...",
+    "when_to_use": [
+      "matching rows"
+    ],
+    "anti_patterns": [
+      "missing ON"
+    ],
+    "related_patterns": []
+  },
+  {
+    "id": "join_left",
+    "title": "Left join",
+    "intent_tags": [
+      "join",
+      "nulls"
+    ],
+    "sql_features": [
+      "join"
+    ],
+    "difficulty": "beginner",
+    "pattern_type": "relational",
+    "template": "A LEFT JOIN B",
+    "when_to_use": [
+      "retain left"
+    ],
+    "anti_patterns": [
+      "filtering after join"
+    ],
+    "related_patterns": []
+  },
+  {
+    "id": "join_anti",
+    "title": "Anti join",
+    "intent_tags": [
+      "exclusion"
+    ],
+    "sql_features": [
+      "join"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "relational",
+    "template": "LEFT JOIN ... WHERE B.id IS NULL",
+    "when_to_use": [
+      "find missing"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  },
+  {
+    "id": "join_semi",
+    "title": "Semi join",
+    "intent_tags": [
+      "exists"
+    ],
+    "sql_features": [
+      "subquery"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "relational",
+    "template": "WHERE EXISTS (...)",
+    "when_to_use": [
+      "existence check"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  }
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "id": "pattern_top_n",
+    "title": "Top N per group",
+    "intent_tags": [
+      "top_n"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "analytical",
+    "template": "ROW_NUMBER filter",
+    "when_to_use": [
+      "ranking"
+    ],
+    "anti_patterns": [],
+    "related_patterns": [
+      "wf_row_number"
+    ]
+  },
+  {
+    "id": "pattern_dedup",
+    "title": "Deduplication",
+    "intent_tags": [
+      "cleaning"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "transformation",
+    "template": "ROW_NUMBER delete",
+    "when_to_use": [
+      "duplicates"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  },
+  {
+    "id": "pattern_funnel",
+    "title": "Funnel analysis",
+    "intent_tags": [
+      "conversion"
+    ],
+    "sql_features": [
+      "cte"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "analytical",
+    "template": "multi-step join",
+    "when_to_use": [
+      "conversion"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  }
+]

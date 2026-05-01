@@ -1,0 +1,29 @@
+{
+  "id": "grain_order_level",
+  "title": "Correct order-level aggregation",
+  "intent_tags": [
+    "aggregation",
+    "grain",
+    "business_metrics"
+  ],
+  "sql_features": [
+    "group_by",
+    "distinct",
+    "aggregation"
+  ],
+  "difficulty": "intermediate",
+  "pattern_type": "analytical",
+  "template": "SELECT SUM(metric) / COUNT(DISTINCT order_id) FROM table",
+  "when_to_use": [
+    "row-level datasets",
+    "Superstore",
+    "fact tables with line items"
+  ],
+  "anti_patterns": [
+    "AVG(metric) on transactional rows",
+    "treating line items as orders"
+  ],
+  "related_patterns": [
+    "cte_basic"
+  ]
+}

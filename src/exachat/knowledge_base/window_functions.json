@@ -1,0 +1,215 @@
+[
+  {
+    "id": "wf_row_number",
+    "title": "ROW_NUMBER ranking",
+    "intent_tags": [
+      "ranking",
+      "dedup",
+      "top_n"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "ROW_NUMBER() OVER(PARTITION BY g ORDER BY m DESC)",
+    "when_to_use": [
+      "top N per group",
+      "dedup"
+    ],
+    "anti_patterns": [
+      "missing partition"
+    ],
+    "related_patterns": [
+      "wf_rank",
+      "wf_dense_rank"
+    ]
+  },
+  {
+    "id": "wf_rank",
+    "title": "RANK with gaps",
+    "intent_tags": [
+      "ranking"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "RANK() OVER(PARTITION BY g ORDER BY m DESC)",
+    "when_to_use": [
+      "leaderboards"
+    ],
+    "anti_patterns": [
+      "expect no gaps"
+    ],
+    "related_patterns": [
+      "wf_dense_rank"
+    ]
+  },
+  {
+    "id": "wf_dense_rank",
+    "title": "Dense ranking",
+    "intent_tags": [
+      "ranking"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "DENSE_RANK() OVER(PARTITION BY g ORDER BY m DESC)",
+    "when_to_use": [
+      "compact ranking"
+    ],
+    "anti_patterns": [
+      "expect gaps"
+    ],
+    "related_patterns": [
+      "wf_rank"
+    ]
+  },
+  {
+    "id": "wf_ntile",
+    "title": "NTILE bucketing",
+    "intent_tags": [
+      "quantiles",
+      "segmentation"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "analytical",
+    "template": "NTILE(4) OVER(ORDER BY m)",
+    "when_to_use": [
+      "quartiles"
+    ],
+    "anti_patterns": [
+      "small dataset"
+    ],
+    "related_patterns": []
+  },
+  {
+    "id": "wf_running_sum",
+    "title": "Running total",
+    "intent_tags": [
+      "cumulative",
+      "timeseries"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "SUM(x) OVER(ORDER BY t ROWS UNBOUNDED PRECEDING)",
+    "when_to_use": [
+      "cumulative metrics"
+    ],
+    "anti_patterns": [
+      "missing order"
+    ],
+    "related_patterns": []
+  },
+  {
+    "id": "wf_running_avg",
+    "title": "Running average",
+    "intent_tags": [
+      "moving_avg"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "AVG(x) OVER(ORDER BY t ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)",
+    "when_to_use": [
+      "smoothing"
+    ],
+    "anti_patterns": [
+      "wrong window frame"
+    ],
+    "related_patterns": []
+  },
+  {
+    "id": "wf_lag",
+    "title": "LAG previous row",
+    "intent_tags": [
+      "delta",
+      "comparison"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "LAG(x) OVER(ORDER BY t)",
+    "when_to_use": [
+      "change detection"
+    ],
+    "anti_patterns": [
+      "no order"
+    ],
+    "related_patterns": [
+      "wf_lead"
+    ]
+  },
+  {
+    "id": "wf_lead",
+    "title": "LEAD next row",
+    "intent_tags": [
+      "forecast"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "LEAD(x) OVER(ORDER BY t)",
+    "when_to_use": [
+      "next value"
+    ],
+    "anti_patterns": [],
+    "related_patterns": [
+      "wf_lag"
+    ]
+  },
+  {
+    "id": "wf_first_value",
+    "title": "FIRST_VALUE",
+    "intent_tags": [
+      "baseline"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "FIRST_VALUE(x) OVER(PARTITION BY g ORDER BY t)",
+    "when_to_use": [
+      "baseline comparison"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  },
+  {
+    "id": "wf_last_value",
+    "title": "LAST_VALUE",
+    "intent_tags": [
+      "latest"
+    ],
+    "sql_features": [
+      "window"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "analytical",
+    "template": "LAST_VALUE(x) OVER(...)",
+    "when_to_use": [
+      "latest value"
+    ],
+    "anti_patterns": [
+      "frame issues"
+    ],
+    "related_patterns": []
+  }
+]

@@ -45,6 +45,9 @@ exachat = "exachat.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+exachat = ["knowledge_base/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

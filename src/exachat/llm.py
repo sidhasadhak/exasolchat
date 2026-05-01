@@ -28,7 +28,8 @@ class LLMBackend(ABC):
     @abstractmethod
     def generate_sql(
         self, schema_prompt: str, question: str,
-        rag_examples: Optional[str] = None,
+        kb_context: Optional[str] = None,
+        history: Optional[list[dict]] = None,
     ) -> LLMResponse:
         ...
 
@@ -68,14 +69,22 @@ DuckDB SQL dialect — apply these rules when the dialect is duckdb:
 
     def _build_sql_prompt(
         self, schema_prompt: str, question: str,
-        rag_examples: Optional[str] = None,
+        kb_context: Optional[str] = None,
+        history: Optional[list[dict]] = None,
     ) -> str:
-        rag_section = ""
-        if rag_examples:
-            rag_section = f"""
-SIMILAR PAST QUERIES (use these as reference for style and patterns):
-{rag_examples}
+        kb_section = ""
+        if kb_context:
+            kb_section = f"""
+RELEVANT SQL PATTERNS (apply these techniques where appropriate):
+{kb_context}
 """
+        history_section = ""
+        if history:
+            turns = []
+            for h in history:
+                turns.append(f"Q: {h['question']}\nSQL:\n```sql\n{h['sql']}\n```")
+            history_section = "\nCONVERSATION HISTORY (the user may be refining or following up on these):\n" + "\n\n".join(turns) + "\n"
+
         dialect_section = self._DUCKDB_DIALECT_HINTS if "duckdb" in schema_prompt.lower() else (
             "- For Exasol: use LIMIT, double-quote identifiers only if mixed case."
         )
@@ -89,11 +98,18 @@ RULES:
 - Return SQL inside a ```sql code block.
 - After the SQL, write 1-2 sentences explaining what it does.
 - If the question cannot be answered from the schema, say so clearly instead of guessing.
+- If the question is a follow-up (e.g. "add actual numbers", "also show X", "filter by Y"), modify the most recent SQL from conversation history to address it.
 - Use appropriate aggregations, JOINs, filtering, and window functions.
 - Alias columns for human readability.
+SQL FORMATTING (important):
+- Put each clause on its own line: SELECT, FROM, JOIN, WHERE, GROUP BY, HAVING, ORDER BY, LIMIT.
+- Indent column lists and conditions with 4 spaces.
+- Do NOT use -- inline comments anywhere in the SQL. They break execution when the query is minified.
+- Do NOT use /* */ block comments either.
+- Each selected column on its own line, comma at the end of the line (not the start).
 {dialect_section}
 {schema_prompt}
-{rag_section}
+{kb_section}{history_section}
 USER QUESTION: {question}"""
 
     def _build_summary_prompt(self, question: str, sql: str, data_preview: str) -> str:
@@ -166,9 +182,10 @@ class OllamaBackend(LLMBackend):
 
     def generate_sql(
         self, schema_prompt: str, question: str,
-        rag_examples: Optional[str] = None,
+        kb_context: Optional[str] = None,
+        history: Optional[list[dict]] = None,
     ) -> LLMResponse:
-        prompt = self._build_sql_prompt(schema_prompt, question, rag_examples)
+        prompt = self._build_sql_prompt(schema_prompt, question, kb_context, history)
         raw = self._chat(prompt)
         sql = self._extract_sql(raw)
         explanation = raw.split("```")[-1].strip() if "```" in raw else ""
@@ -216,9 +233,10 @@ class OpenAICompatibleBackend(LLMBackend):
 
     def generate_sql(
         self, schema_prompt: str, question: str,
-        rag_examples: Optional[str] = None,
+        kb_context: Optional[str] = None,
+        history: Optional[list[dict]] = None,
     ) -> LLMResponse:
-        prompt = self._build_sql_prompt(schema_prompt, question, rag_examples)
+        prompt = self._build_sql_prompt(schema_prompt, question, kb_context, history)
         raw = self._chat(prompt)
         sql = self._extract_sql(raw)
         explanation = raw.split("```")[-1].strip() if "```" in raw else ""

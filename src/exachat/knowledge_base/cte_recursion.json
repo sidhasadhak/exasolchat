@@ -1,0 +1,61 @@
+[
+  {
+    "id": "cte_basic",
+    "title": "Basic CTE",
+    "intent_tags": [
+      "modular"
+    ],
+    "sql_features": [
+      "cte"
+    ],
+    "difficulty": "beginner",
+    "pattern_type": "transformation",
+    "template": "WITH c AS (SELECT ...) SELECT * FROM c",
+    "when_to_use": [
+      "readability"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  },
+  {
+    "id": "cte_multi",
+    "title": "Multi-step CTE",
+    "intent_tags": [
+      "pipeline"
+    ],
+    "sql_features": [
+      "cte"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "transformation",
+    "template": "WITH a AS (...), b AS (...) SELECT ...",
+    "when_to_use": [
+      "multi-stage logic"
+    ],
+    "anti_patterns": [
+      "overuse"
+    ],
+    "related_patterns": []
+  },
+  {
+    "id": "cte_recursive",
+    "title": "Recursive hierarchy",
+    "intent_tags": [
+      "tree",
+      "graph"
+    ],
+    "sql_features": [
+      "cte"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "analytical",
+    "template": "WITH RECURSIVE t AS (...)",
+    "when_to_use": [
+      "org charts"
+    ],
+    "anti_patterns": [
+      "infinite loop"
+    ],
+    "related_patterns": []
+  }
+]

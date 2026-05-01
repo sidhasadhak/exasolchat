@@ -1,0 +1,20 @@
+[
+  {
+    "id": "json_extract",
+    "title": "JSON extraction",
+    "intent_tags": [
+      "json"
+    ],
+    "sql_features": [
+      "json"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "transformation",
+    "template": "col->>'key'",
+    "when_to_use": [
+      "nested data"
+    ],
+    "anti_patterns": [],
+    "related_patterns": []
+  }
+]

@@ -1,0 +1,25 @@
+{
+  "id": "time_filtering_before_window",
+  "title": "Filter time before applying window functions",
+  "intent_tags": [
+    "time_series",
+    "correctness"
+  ],
+  "sql_features": [
+    "cte",
+    "date_trunc"
+  ],
+  "difficulty": "advanced",
+  "pattern_type": "analytical",
+  "template": "WITH filtered AS (SELECT * FROM t WHERE date >= ...)",
+  "when_to_use": [
+    "rolling windows",
+    "recent trend analysis"
+  ],
+  "anti_patterns": [
+    "filtering after window functions (QUALIFY misuse)"
+  ],
+  "related_patterns": [
+    "window_trend_lag"
+  ]
+}
