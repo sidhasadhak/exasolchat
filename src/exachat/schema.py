@@ -128,17 +128,57 @@ class SchemaContext:
           "order_date"  →  "Order Date"   (builder always quotes; swap the name inside)
           order_date    →  "Order Date"   (LLM wrote unquoted; add quotes + original name)
 
-        The unquoted replacement is only applied when the original name contained a
-        space (those MUST be quoted in SQL) to avoid clashing with SQL keywords.
+        Both replacements are quote-aware: text inside existing double-quoted
+        strings (e.g. aliases like "Total order_id") is left untouched.
         """
         mapping = self.col_name_map()
         for norm, orig in mapping.items():
-            # quoted normalized → quoted original  (handles builder output)
-            sql = sql.replace(f'"{norm}"', f'"{orig}"')
-            # unquoted normalized → quoted original  (handles LLM output, only for names with spaces)
+            # Replace "normalized" → "original" (quoted form, e.g. builder output)
+            sql = _replace_quoted_identifier(sql, norm, orig)
+            # Replace bare normalized → "original" (unquoted LLM output, spaces only)
             if " " in orig:
-                sql = re.sub(rf"\b{re.escape(norm)}\b", f'"{orig}"', sql)
+                sql = _replace_unquoted_identifier(sql, norm, orig)
         return sql
+
+
+# ─── Quote-aware SQL identifier replacement ──────────────────────────
+
+def _replace_quoted_identifier(sql: str, norm: str, orig: str) -> str:
+    """Replace "norm" → "orig" only when norm appears as a standalone quoted identifier.
+
+    Uses a quote-aware regex so that occurrences of "norm" that are part of a
+    longer quoted string (e.g. "Total norm") are left untouched.
+    The pattern matches either any full quoted token or exactly "norm", and
+    only replaces the exact match.
+    """
+    pattern = re.compile(r'"[^"]*"')
+
+    def replacer(m: re.Match) -> str:
+        token = m.group(0)
+        # Only swap if it is exactly the quoted normalized name
+        if token == f'"{norm}"':
+            return f'"{orig}"'
+        return token  # e.g. "Total order_id" — leave unchanged
+
+    return pattern.sub(replacer, sql)
+
+
+def _replace_unquoted_identifier(sql: str, norm: str, orig: str) -> str:
+    """Replace bare `norm` → `"orig"` only in unquoted regions of the SQL.
+
+    Matches either a full quoted token (skipped) or the whole-word pattern
+    (replaced). This prevents touching identifiers inside alias strings like
+    "Total order_id".
+    """
+    pattern = re.compile(rf'"[^"]*"|\b{re.escape(norm)}\b')
+
+    def replacer(m: re.Match) -> str:
+        token = m.group(0)
+        if token.startswith('"'):
+            return token  # inside a quoted string — leave it alone
+        return f'"{orig}"'
+
+    return pattern.sub(replacer, sql)
 
 
 # ─── Exasol introspection via pyexasol ──────────────────────────────
