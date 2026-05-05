@@ -39,6 +39,13 @@ st.markdown("""
     .block-container { padding-top: 1.5rem; max-width: 1100px; }
     code, pre, .stCode { font-family: 'JetBrains Mono', monospace !important; }
 
+    /* Compact app header */
+    header[data-testid="stHeader"],
+    .stAppHeader {
+        height: 2.75rem !important;
+        min-height: 2.75rem !important;
+    }
+
     [data-testid="stSidebar"] { background-color: #1a1a1a; }
     [data-testid="stSidebar"] * { color: #e8e8e8 !important; }
     [data-testid="stSidebar"] .stSelectbox label,
