@@ -93,28 +93,25 @@ st.markdown("""
     .stButton > button[kind="primary"] { background: #f97316; border: none; }
     .stButton > button[kind="primary"]:hover { background: #ea6c0a; }
 
-    /* Tab labels — force visibility regardless of Streamlit version */
-    button[data-baseweb="tab"] {
-        color: #c9c9c9 !important;
+    /* Tab labels — target the actual <p> inside stMarkdownContainer inside stTab */
+    button[data-testid="stTab"] p {
+        color: #b0b0b0 !important;
         font-size: 0.92rem !important;
         font-weight: 500 !important;
+        margin: 0 !important;
     }
-    button[data-baseweb="tab"]:hover {
+    button[data-testid="stTab"]:hover p {
         color: #ffffff !important;
     }
-    button[data-baseweb="tab"][aria-selected="true"] {
+    button[data-testid="stTab"][aria-selected="true"] p {
         color: #f97316 !important;
+        font-weight: 600 !important;
     }
     [data-baseweb="tab-highlight"] {
         background-color: #f97316 !important;
     }
     [data-baseweb="tab-border"] {
         background-color: #2d2d2d !important;
-    }
-    /* Catch-all: any p/span inside a tab button */
-    button[data-baseweb="tab"] p,
-    button[data-baseweb="tab"] span {
-        color: inherit !important;
     }
 </style>
 """, unsafe_allow_html=True)
