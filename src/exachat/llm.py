@@ -171,28 +171,6 @@ Respond with ONLY a JSON object (no markdown fences, no explanation):
 }}
 Use "table_only" if the data isn't well-suited for charting (e.g., single row, text-heavy)."""
 
-    def _extract_sql(self, text: str) -> str:
-        """Extract SQL from LLM response."""
-        # Try <sql> tags first (fine-tuned model format)
-        match = re.search(r"<sql>\s*(.*?)\s*</sql>", text, re.DOTALL)
-        if match:
-            return match.group(1).strip().rstrip(";")
-
-        # Fall back to ```sql blocks (generic model format)
-        match = re.search(r"```sql\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-
-        match = re.search(r"```\s*(SELECT.*?)```", text, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-
-        match = re.search(r"((?:WITH|SELECT)\s+.+?)(?:;|\Z)", text, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-
-        return text.strip()
-
     def _extract_json_list(self, text: str) -> list[str]:
         """Extract a JSON string array from LLM output."""
         try:
@@ -205,6 +183,19 @@ Use "table_only" if the data isn't well-suited for charting (e.g., single row, t
         except Exception:
             pass
         return []
+
+    def _extract_sql(self, text: str) -> str:
+        """Extract SQL from LLM response."""
+        match = re.search(r"```sql\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"```\s*(SELECT.*?)```", text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"((?:WITH|SELECT)\s+.+?)(?:;|\Z)", text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return text.strip()
 
 
 class OllamaBackend(LLMBackend):
