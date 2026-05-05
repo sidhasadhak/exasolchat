@@ -6,10 +6,25 @@ Provides a unified query execution interface.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
 import pandas as pd
+
+
+def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Lowercase column headers and replace whitespace runs with a single underscore.
+
+    e.g.  "Order Date"  →  "order_date"
+          "  Sales  "   →  "sales"
+          "Customer ID" →  "customer_id"
+    """
+    df.columns = [
+        re.sub(r"\s+", "_", col.strip()).lower()
+        for col in df.columns
+    ]
+    return df
 
 
 @dataclass
@@ -134,12 +149,18 @@ class DatabaseConnection:
         return self._sqla_engine
 
     def execute_query(self, sql: str, max_rows: int = 5000) -> pd.DataFrame:
-        """Execute a SELECT query and return results as DataFrame."""
+        """Execute a SELECT query and return results as DataFrame.
+
+        Column headers are always normalised: lowercased and spaces replaced
+        with underscores (e.g. "Order Date" → "order_date").
+        """
         if self.is_exasol:
-            return self._execute_exasol(sql, max_rows)
-        if self.is_duckdb:
-            return self._execute_duckdb(sql, max_rows)
-        return self._execute_sqlalchemy(sql, max_rows)
+            df = self._execute_exasol(sql, max_rows)
+        elif self.is_duckdb:
+            df = self._execute_duckdb(sql, max_rows)
+        else:
+            df = self._execute_sqlalchemy(sql, max_rows)
+        return _normalise_columns(df)
 
     def _execute_exasol(self, sql: str, max_rows: int) -> pd.DataFrame:
         """Execute via pyexasol."""
