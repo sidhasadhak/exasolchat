@@ -66,6 +66,13 @@ DuckDB SQL dialect — apply these rules when the dialect is duckdb:
 - SELECT * REPLACE(expr AS col) — wildcard with column overrides.
 - QUALIFY — filter window function results without a subquery:
     SELECT * FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY x ORDER BY y) = 1
+  ⚠ QUALIFY is ONLY for window functions. Use HAVING to filter aggregates (SUM, AVG, COUNT, etc.).
+  ⚠ QUALIFY cannot be combined with GROUP BY ALL — use explicit GROUP BY columns if QUALIFY is needed.
+- HAVING — filter aggregate results (always prefer over QUALIFY for non-window filters):
+    SELECT customer, SUM(sales) AS total FROM t GROUP BY customer HAVING total > 1000
+- Nested aggregates (AVG of COUNT) require a CTE — you cannot nest aggregate functions directly:
+    WITH counts AS (SELECT customer, COUNT(*) AS n FROM t GROUP BY customer)
+    SELECT AVG(n) FROM counts
 - PIVOT / UNPIVOT — transpose rows to columns and back.
 - UNION BY NAME — match union sides by column name, not position.
 - string_split(col, delim), regexp_matches(col, pattern), string_agg(col, sep)
