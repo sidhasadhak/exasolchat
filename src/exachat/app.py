@@ -149,15 +149,54 @@ def _wants_viz(question: str) -> bool:
 
 # ── Helper functions ─────────────────────────────────────────────────
 
-def _render_chart(result: QueryResult):
-    if result.chart_obj is None:
+def _render_chart_dynamic(
+    r: QueryResult,
+    df: pd.DataFrame,
+    selected: list[str],
+    dim_cols: list[str],
+) -> bool:
+    """Render a chart using the selected measure columns.
+
+    Falls back gracefully: uses the LLM chart config as hints for chart
+    type and x-axis, then builds with plotly.
+    """
+    if not selected or df.empty:
         return False
-    lib, chart = result.chart_obj
-    if lib == "plotly":
-        st.plotly_chart(chart, use_container_width=True)
-    elif lib == "altair":
-        st.altair_chart(chart, use_container_width=True)
-    return True
+
+    cfg = r.chart_config or {}
+    chart_type = cfg.get("chart_type", "bar")
+    if chart_type == "table_only":
+        return False
+
+    # Pick x-axis: honour LLM suggestion if still in df, else first dim
+    x_col = cfg.get("x")
+    if not x_col or x_col not in df.columns:
+        x_col = dim_cols[0] if dim_cols else None
+    if not x_col:
+        return False
+
+    try:
+        import plotly.express as px
+        y = selected[0] if len(selected) == 1 else selected
+
+        if chart_type == "line":
+            fig = px.line(df, x=x_col, y=y)
+        elif chart_type == "area":
+            fig = px.area(df, x=x_col, y=y)
+        elif chart_type == "scatter":
+            fig = px.scatter(df, x=x_col, y=selected[0])
+        elif chart_type == "pie" and len(selected) == 1:
+            fig = px.pie(df, names=x_col, values=selected[0])
+        else:
+            # bar — grouped when multiple measures
+            barmode = "group" if len(selected) > 1 else "relative"
+            fig = px.bar(df, x=x_col, y=y, barmode=barmode)
+
+        fig.update_layout(margin=dict(t=30, b=0), legend_title_text="")
+        st.plotly_chart(fig, use_container_width=True)
+        return True
+    except Exception:
+        return False
 
 
 def _render_result(r: QueryResult):
@@ -195,30 +234,48 @@ def _render_result(r: QueryResult):
             )
 
     if r.data is not None and len(r.data) > 0:
-        chart_rendered = _render_chart(r)
+        df = r.data
+        has_chart = r.chart_obj is not None and (r.chart_config or {}).get("chart_type") != "table_only"
+
+        # Detect numeric (measure) vs non-numeric (dimension) columns
+        num_cols  = df.select_dtypes(include="number").columns.tolist()
+        dim_cols  = df.select_dtypes(exclude="number").columns.tolist()
+
+        # Measure picker — only shown when there are 2+ numeric columns and a chart exists
+        selected_measures = num_cols
+        if has_chart and len(num_cols) > 1:
+            selected_measures = st.multiselect(
+                "📊 Measures",
+                options=num_cols,
+                default=num_cols,
+                key=f"ms_{key}",
+                help="Choose which measures to display in the chart",
+            )
+
+        # Render chart (dynamic rebuild when measure selection active)
+        chart_rendered = False
+        if has_chart:
+            if len(num_cols) > 1:
+                chart_rendered = _render_chart_dynamic(r, df, selected_measures, dim_cols)
+            else:
+                # Single measure — use original LLM-generated chart as-is
+                lib, chart = r.chart_obj
+                if lib == "plotly":
+                    st.plotly_chart(chart, use_container_width=True)
+                elif lib == "altair":
+                    st.altair_chart(chart, use_container_width=True)
+                chart_rendered = True
+
         skip_table = chart_rendered and _wants_viz(r.question)
-
         if not skip_table:
-            st.dataframe(
-                r.data,
-                use_container_width=True,
-                height=min(400, 35 * len(r.data) + 50),
-            )
+            st.dataframe(df, use_container_width=True, height=min(400, 35 * len(df) + 50))
 
-        col_dl, col_bld, col_gap = st.columns([1, 1, 5])
+        col_dl, col_gap = st.columns([1, 6])
         with col_dl:
-            csv = r.data.to_csv(index=False)
             st.download_button(
-                "📥 CSV", csv, "query_result.csv", "text/csv",
-                use_container_width=True,
-                key=f"dl_{key}",
+                "📥 CSV", df.to_csv(index=False), "query_result.csv", "text/csv",
+                use_container_width=True, key=f"dl_{key}",
             )
-        with col_bld:
-            if st.button("📊 Builder", key=f"bld_{key}",
-                         use_container_width=True,
-                         help="Open this query in the visual builder"):
-                st.session_state.open_in_builder = r.sql
-                st.rerun()
 
     # Follow-up suggestions
     if r.followups:
