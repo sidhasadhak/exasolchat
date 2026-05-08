@@ -179,6 +179,7 @@ class DatabaseConnection:
 
     def _execute_sqlalchemy(self, sql: str, max_rows: int) -> pd.DataFrame:
         """Execute via SQLAlchemy."""
+        import datetime
         from sqlalchemy import text
         with self._sqla_engine.connect() as conn:
             try:
@@ -188,7 +189,30 @@ class DatabaseConnection:
             result = conn.execute(text(sql))
             rows = result.fetchmany(max_rows)
             columns = list(result.keys())
-            return pd.DataFrame(rows, columns=columns)
+            df = pd.DataFrame(rows, columns=columns)
+
+        # psycopg3 (and psycopg2) return Decimal for numeric aggregates and
+        # timedelta for interval arithmetic.  Pandas stores both as object dtype,
+        # which makes select_dtypes(include="number") miss them entirely.
+        # Coerce to Python-native types so charts and aggregations work correctly.
+        for col in df.columns:
+            if df[col].dtype != object:
+                continue
+            sample = df[col].dropna()
+            if sample.empty:
+                continue
+            first = sample.iloc[0]
+            if isinstance(first, datetime.timedelta):
+                # Convert interval → fractional days (most intuitive for delivery time etc.)
+                df[col] = df[col].apply(
+                    lambda v: v.total_seconds() / 86400 if isinstance(v, datetime.timedelta) else v
+                ).astype(float)
+            else:
+                converted = pd.to_numeric(df[col], errors="coerce")
+                if converted.notna().sum() >= len(df) * 0.5:
+                    df[col] = converted
+
+        return df
 
     def close(self):
         """Close connection."""

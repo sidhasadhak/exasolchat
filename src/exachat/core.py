@@ -7,8 +7,11 @@ safety validation, query execution, and chart suggestion into a single
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -219,6 +222,13 @@ class ExasolChat:
 
         # 4. Rewrite normalized column names back to quoted originals, then execute
         exec_sql = self.schema_context.denormalize_sql(sql)
+
+        # For PostgreSQL: guard timestamp/date casts against empty-string values
+        # that are common in CSV-loaded data and cause InvalidDatetimeFormat errors.
+        _dialect = (self.schema_context.dialect or "").lower()
+        if "postgres" in _dialect or "postgresql" in _dialect:
+            exec_sql = _pg_fix_timestamp_casts(exec_sql)
+
         try:
             df = self._db.execute_query(exec_sql, self.max_rows)
         except Exception as e:
@@ -273,17 +283,64 @@ class ExasolChat:
         return result
 
     def generate_explore_questions(self) -> list[str]:
-        """Generate 5 starter questions based on schema + data profile."""
+        """Generate 5 starter questions, served from cache when schema is unchanged."""
+        fp = self._schema_fingerprint()
+        cached = self._load_question_cache(fp)
+        if cached:
+            return cached
         try:
             profile = self._build_profile()
-            return self.llm.generate_explore_questions(self.schema_prompt, profile)
+            questions = self.llm.generate_explore_questions(self.schema_prompt, profile)
+            if questions:
+                self._save_question_cache(fp, questions)
+            return questions
         except Exception:
             return []
 
+    # ── Schema fingerprint + question cache ───────────────────────────
+
+    _CACHE_FILE = Path.home() / ".exachat" / "explore_cache.json"
+    _CACHE_MAX  = 30  # keep at most this many schema fingerprints
+
+    def _schema_fingerprint(self) -> str:
+        key = "|".join(
+            f"{t.name}:{len(t.columns)}:{t.row_count or 0}"
+            for t in self.schema_context.tables
+        )
+        return hashlib.md5(key.encode()).hexdigest()[:16]
+
+    def _load_question_cache(self, fp: str) -> list[str] | None:
+        try:
+            if self._CACHE_FILE.exists():
+                data = json.loads(self._CACHE_FILE.read_text())
+                return data.get(fp)
+        except Exception:
+            pass
+        return None
+
+    def _save_question_cache(self, fp: str, questions: list[str]) -> None:
+        try:
+            self._CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data: dict = {}
+            if self._CACHE_FILE.exists():
+                data = json.loads(self._CACHE_FILE.read_text())
+            data[fp] = questions
+            if len(data) > self._CACHE_MAX:
+                for old in list(data)[: len(data) - self._CACHE_MAX]:
+                    del data[old]
+            self._CACHE_FILE.write_text(json.dumps(data, indent=2))
+        except Exception:
+            pass
+
     def _build_profile(self) -> str:
-        """Build a data profile string for the LLM to generate explore questions."""
+        """Lightweight data profile sent alongside the schema to generate questions.
+
+        For DuckDB: uses SUMMARIZE (min/max/unique counts).
+        For everything else: schema_prompt already contains all column info,
+        so we only add row counts to avoid a redundant LLM context.
+        """
         lines = []
-        for table in self.schema_context.tables[:4]:
+        for table in self.schema_context.tables[:5]:
             row_count = table.row_count or "?"
             lines.append(f"\nTable: {table.name} ({row_count} rows)")
 
@@ -293,12 +350,12 @@ class ExasolChat:
                         f'SELECT * FROM (SUMMARIZE "{table.name}") LIMIT 30'
                     ).df()
                     for _, row in df.iterrows():
-                        col = row.get("column_name", "")
-                        ctype = row.get("column_type", "")
-                        mn = row.get("min", "")
-                        mx = row.get("max", "")
+                        col    = row.get("column_name", "")
+                        ctype  = row.get("column_type", "")
+                        mn     = row.get("min", "")
+                        mx     = row.get("max", "")
                         unique = row.get("approx_unique", "")
-                        nulls = row.get("null_percentage", "")
+                        nulls  = row.get("null_percentage", "")
                         lines.append(
                             f"  - {col} ({ctype}): min={mn}, max={mx}, "
                             f"~{unique} unique, {nulls}% null"
@@ -307,7 +364,9 @@ class ExasolChat:
                 except Exception:
                     pass
 
-            for col in table.columns[:12]:
+            # Non-DuckDB: column names/types are already in schema_prompt;
+            # just confirm which columns exist (first 8 to keep prompt small).
+            for col in table.columns[:8]:
                 lines.append(f"  - {col.name}: {col.type}")
 
         return "\n".join(lines)
@@ -338,6 +397,52 @@ class ExasolChat:
 
 def _normalise(name: str) -> str:
     return re.sub(r"[\s_]+", "", name.lower())
+
+
+def _pg_fix_timestamp_casts(sql: str) -> str:
+    """Rewrite unsafe timestamp/date casts for PostgreSQL.
+
+    Data loaded from CSV often stores missing dates as '' (empty string) rather
+    than NULL.  PostgreSQL's CAST / :: operator raises InvalidDatetimeFormat on
+    empty strings.  Wrapping the expression in NULLIF(expr, '') makes the cast
+    return NULL instead of erroring.
+
+    Handles both forms the LLM commonly emits:
+        CAST(col AS TIMESTAMP)  →  NULLIF(col, '')::TIMESTAMP
+        col::TIMESTAMP          →  NULLIF(col, '')::TIMESTAMP
+    """
+    _TS = r'(TIMESTAMP(?:TZ|(?:\s+WITH(?:OUT)?\s+TIME\s+ZONE))?|DATE)'
+    # Already-wrapped expressions — don't touch
+    _already = re.compile(r"NULLIF\s*\(", re.IGNORECASE)
+
+    def _wrap(expr: str, typ: str) -> str:
+        expr = expr.strip()
+        if _already.match(expr):
+            return f"{expr}::{typ}"
+        return f"NULLIF({expr}, '')::{typ.strip()}"
+
+    # 1. CAST(expr AS TIMESTAMP/DATE)
+    sql = re.sub(
+        rf'CAST\(\s*(\w+)\s+AS\s+{_TS}\s*\)',
+        lambda m: _wrap(m.group(1), m.group(2)),
+        sql, flags=re.IGNORECASE,
+    )
+
+    # 2. plain_identifier::TIMESTAMP/DATE  (skip function names / keywords)
+    _SKIP = {"NOW", "CURRENT_TIMESTAMP", "CURRENT_DATE", "INTERVAL",
+             "NULLIF", "COALESCE", "CAST", "TRUE", "FALSE"}
+    def _replace_bare(m: re.Match) -> str:
+        ident = m.group(1)
+        if ident.upper() in _SKIP:
+            return m.group(0)
+        return _wrap(ident, m.group(2))
+
+    sql = re.sub(
+        rf'\b(\w+)::{_TS}\b',
+        _replace_bare,
+        sql, flags=re.IGNORECASE,
+    )
+    return sql
 
 
 def _check_column_ambiguity(sql: str, schema: "SchemaContext") -> list[str]:

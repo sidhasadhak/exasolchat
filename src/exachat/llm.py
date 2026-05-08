@@ -81,6 +81,28 @@ DuckDB SQL dialect — apply these rules when the dialect is duckdb:
 - Trailing commas in SELECT/FROM lists are valid syntax.
 """
 
+    _POSTGRESQL_DIALECT_HINTS = """
+PostgreSQL SQL dialect — apply these rules when the dialect is postgresql:
+- Use LIMIT not TOP.
+- Casting: CAST(x AS TYPE) or x::TYPE.
+- EMPTY STRINGS vs NULL: Data loaded from CSV often stores missing values as '' (empty string)
+  instead of NULL. For date/timestamp columns ALWAYS guard against empty strings:
+    NULLIF(col, '')::timestamp        -- safe cast, returns NULL for '' instead of erroring
+    WHERE col <> '' AND col IS NOT NULL  -- safe filter
+  Never cast a date/timestamp column directly without NULLIF if the data came from CSV/flat files.
+- Date/time arithmetic:
+    Subtracting two timestamps returns an INTERVAL: ts2 - ts1
+    To get days as a number: EXTRACT(epoch FROM (ts2 - ts1)) / 86400
+    Or use: DATE_PART('day', ts2 - ts1)
+    AGE(ts2, ts1) returns a human-readable interval.
+    DATE_TRUNC('month', col), EXTRACT(year FROM col), NOW(), CURRENT_DATE
+- String functions: CONCAT, ||, LOWER, UPPER, TRIM, SPLIT_PART, REGEXP_REPLACE
+- NULL-safe aggregation: use FILTER (WHERE col IS NOT NULL) or COALESCE.
+- Window functions: standard OVER (PARTITION BY ... ORDER BY ...) syntax.
+- CTEs: WITH name AS (...) SELECT ...
+- Use double-quotes for identifiers with spaces or mixed case; lowercase is case-insensitive.
+"""
+
     def _build_sql_prompt(
         self, schema_prompt: str, question: str,
         kb_context: Optional[str] = None,
@@ -99,9 +121,13 @@ RELEVANT SQL PATTERNS (apply these techniques where appropriate):
                 turns.append(f"Q: {h['question']}\nSQL:\n```sql\n{h['sql']}\n```")
             history_section = "\nCONVERSATION HISTORY (the user may be refining or following up on these):\n" + "\n\n".join(turns) + "\n"
 
-        dialect_section = self._DUCKDB_DIALECT_HINTS if "duckdb" in schema_prompt.lower() else (
-            "- For Exasol: use LIMIT, double-quote identifiers only if mixed case."
-        )
+        _sp_lower = schema_prompt.lower()
+        if "duckdb" in _sp_lower:
+            dialect_section = self._DUCKDB_DIALECT_HINTS
+        elif "postgresql" in _sp_lower or "postgres" in _sp_lower:
+            dialect_section = self._POSTGRESQL_DIALECT_HINTS
+        else:
+            dialect_section = "- For Exasol: use LIMIT, double-quote identifiers only if mixed case."
 
         return f"""You are a SQL expert. Given the database schema below, write a SQL query that answers the user's question.
 

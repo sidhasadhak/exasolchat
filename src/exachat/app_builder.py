@@ -291,23 +291,21 @@ def render_builder(
             all_cols_b = list(df.columns)
 
             # ── Interactive viz controls ──────────────────────────
-            bvc1, bvc2, bvc3 = st.columns([2, 2, 4])
+            bvc1, bvc2, bvc3, bvc4 = st.columns([2, 2, 3, 3])
             with bvc1:
                 b_viz = st.selectbox(
                     "Chart type",
                     ["auto", "bar", "line", "area", "scatter", "pie", "table only"],
                     key="b_viz_type",
-                    label_visibility="collapsed",
                     help="Chart type for results",
                 )
             with bvc2:
                 _xax_opts = dim_cols_b or all_cols_b
                 if _xax_opts:
                     b_xax = st.selectbox(
-                        "X axis",
+                        "Dimension (X axis)",
                         _xax_opts,
                         key="b_xax",
-                        label_visibility="collapsed",
                         help="Column to use on the X axis",
                     )
                 else:
@@ -316,34 +314,34 @@ def render_builder(
                 _meas_opts = num_cols_b or all_cols_b
                 if len(_meas_opts) > 1:
                     b_measures = st.multiselect(
-                        "Measures",
+                        "Measures (left Y)",
                         _meas_opts,
                         default=_meas_opts,
                         key="b_measures",
-                        label_visibility="collapsed",
-                        help="Which columns to plot as measures",
+                        help="Measures on the left Y axis",
+                        placeholder="Select measures",
                     )
                 else:
                     b_measures = _meas_opts
+            with bvc4:
+                b_y2: list = []
+                if len(_meas_opts) > 1 and b_measures:
+                    b_y2 = st.multiselect(
+                        "Second axis (right Y)",
+                        b_measures,
+                        default=[],
+                        key="b_y2",
+                        help="Move these measures to the right Y axis",
+                        placeholder="Select for dual axis",
+                    )
 
             # ── Chart render ──────────────────────────────────────
-            if b_viz != "table only" and b_measures and b_xax:
+            _b_y1 = [c for c in b_measures if c not in b_y2]
+            if b_viz != "table only" and (_b_y1 or b_y2) and b_xax:
                 try:
-                    import plotly.express as px
+                    from exachat.app import _build_chart_figure
                     _ct = b_viz if b_viz != "auto" else "bar"
-                    _y = b_measures[0] if len(b_measures) == 1 else b_measures
-                    if _ct == "line":
-                        _fig = px.line(df, x=b_xax, y=_y)
-                    elif _ct == "area":
-                        _fig = px.area(df, x=b_xax, y=_y)
-                    elif _ct == "scatter":
-                        _fig = px.scatter(df, x=b_xax, y=b_measures[0])
-                    elif _ct == "pie" and len(b_measures) == 1:
-                        _fig = px.pie(df, names=b_xax, values=b_measures[0])
-                    else:
-                        _bm = "group" if len(b_measures) > 1 else "relative"
-                        _fig = px.bar(df, x=b_xax, y=_y, barmode=_bm)
-                    _fig.update_layout(margin=dict(t=30, b=0), legend_title_text="")
+                    _fig = _build_chart_figure(df, b_xax, _b_y1, b_y2, _ct)
                     st.plotly_chart(_fig, use_container_width=True)
                 except Exception:
                     pass
