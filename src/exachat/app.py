@@ -34,95 +34,199 @@ st.set_page_config(
 # ── Custom styles — Claude-inspired palette ───────────────────────────
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+    /* ── Cloudscape Design System inspired theme ────────────────────────── */
+    @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
-    html, body, [class*="css"] { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-    .block-container { padding-top: 1.5rem; max-width: 1100px; }
-    code, pre, .stCode { font-family: 'JetBrains Mono', monospace !important; }
-
-    /* Compact app header */
-    header[data-testid="stHeader"],
-    .stAppHeader {
-        height: 2.75rem !important;
-        min-height: 2.75rem !important;
+    /* Design tokens */
+    :root {
+        --cs-bg-page:        #161d26;
+        --cs-bg-container:   #1b232d;
+        --cs-bg-sidebar:     #0f141a;
+        --cs-bg-hover:       #333843;
+        --cs-bg-input:       #232b37;
+        --cs-border:         #424650;
+        --cs-border-subtle:  #232b37;
+        --cs-text-primary:   #ebebf0;
+        --cs-text-secondary: #a4a4ad;
+        --cs-text-muted:     #656871;
+        --cs-blue:           #42b4ff;
+        --cs-blue-hover:     #75cfff;
+        --cs-green:          #29ad7f;
+        --cs-yellow:         #f0a800;
+        --cs-red:            #d13212;
+        --cs-radius-sm:      4px;
+        --cs-radius:         8px;
+        --cs-radius-lg:      12px;
     }
 
-    [data-testid="stSidebar"] { background-color: #1a1a1a; }
-    [data-testid="stSidebar"] * { color: #e8e8e8 !important; }
+    /* ── Base ────────────────────────────────────────────────────────────── */
+    html, body, [class*="css"] {
+        font-family: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-size: 14px;
+        line-height: 20px;
+    }
+    .stApp { background-color: var(--cs-bg-page) !important; }
+    .block-container { padding-top: 1.25rem; max-width: 1100px; }
+    code, pre, .stCode, [data-testid="stCode"] {
+        font-family: 'JetBrains Mono', 'Monaco', 'Menlo', 'Consolas', monospace !important;
+        font-size: 12px !important;
+    }
+
+    /* ── App header ──────────────────────────────────────────────────────── */
+    header[data-testid="stHeader"], .stAppHeader {
+        height: 2.75rem !important;
+        min-height: 2.75rem !important;
+        background-color: var(--cs-bg-sidebar) !important;
+        border-bottom: 1px solid var(--cs-border) !important;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────────────────────── */
+    [data-testid="stSidebar"] {
+        background-color: var(--cs-bg-sidebar) !important;
+        border-right: 1px solid var(--cs-border) !important;
+    }
+    [data-testid="stSidebar"] * { color: var(--cs-text-primary) !important; }
     [data-testid="stSidebar"] .stSelectbox label,
     [data-testid="stSidebar"] .stTextInput label,
     [data-testid="stSidebar"] .stTextArea label,
-    [data-testid="stSidebar"] .stNumberInput label { color: #a0a0a0 !important; font-size: 0.8rem !important; }
-
-    [data-testid="stChatMessage"] {
-        border-radius: 12px; padding: 0.75rem 1rem; margin-bottom: 0.5rem;
-    }
-
-    .badge-safe {
-        display: inline-block; padding: 2px 10px; border-radius: 20px;
-        background: rgba(34, 197, 94, 0.12); color: #22c55e;
-        font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em;
-    }
-    .badge-warn {
-        display: inline-block; padding: 2px 10px; border-radius: 20px;
-        background: rgba(251, 146, 60, 0.12); color: #fb923c;
-        font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em;
-    }
-    .badge-blocked {
-        display: inline-block; padding: 2px 10px; border-radius: 20px;
-        background: rgba(239, 68, 68, 0.12); color: #ef4444;
-        font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em;
-    }
-
-    .kb-indicator { font-size: 0.73rem; color: #9ca3af; margin-top: 6px; }
-
-    .col-warning {
-        background: rgba(251, 191, 36, 0.08); border-left: 3px solid #fbbf24;
-        padding: 6px 10px; border-radius: 4px; font-size: 0.82rem;
-        color: #d97706; margin-bottom: 6px;
-    }
-
-    .schema-table-name { font-weight: 600; font-size: 0.9rem; color: #f97316; }
-    .schema-row-count  { font-size: 0.75rem; color: #6b7280; }
-
-    /* Follow-up suggestion pills */
-    div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
-        background: rgba(249, 115, 22, 0.08) !important;
-        border: 1px solid rgba(249, 115, 22, 0.3) !important;
-        color: #f97316 !important;
-        border-radius: 20px !important;
-        font-size: 0.82rem !important;
-        padding: 4px 14px !important;
-    }
-    div[data-testid="stHorizontalBlock"] button[kind="secondary"]:hover {
-        background: rgba(249, 115, 22, 0.15) !important;
-    }
-
-    .stButton > button[kind="primary"] { background: #f97316; border: none; }
-    .stButton > button[kind="primary"]:hover { background: #ea6c0a; }
-
-    /* Tab labels — target the actual <p> inside stMarkdownContainer inside stTab */
-    button[data-testid="stTab"] p {
-        color: #b0b0b0 !important;
-        font-size: 0.92rem !important;
-        font-weight: 500 !important;
-        margin: 0 !important;
-    }
-    button[data-testid="stTab"]:hover p {
-        color: #ffffff !important;
-    }
-    button[data-testid="stTab"][aria-selected="true"] p {
-        color: #f97316 !important;
+    [data-testid="stSidebar"] .stNumberInput label,
+    [data-testid="stSidebar"] .stMultiSelect label {
+        color: var(--cs-text-secondary) !important;
+        font-size: 12px !important;
         font-weight: 600 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+    }
+    [data-testid="stSidebar"] hr {
+        border-color: var(--cs-border) !important;
+        margin: 12px 0 !important;
+    }
+
+    /* ── Form inputs ─────────────────────────────────────────────────────── */
+    .stTextInput > div > div > input,
+    .stTextArea > div > div > textarea,
+    .stNumberInput > div > div > input {
+        background-color: var(--cs-bg-input) !important;
+        border: 1px solid var(--cs-border) !important;
+        border-radius: var(--cs-radius-sm) !important;
+        color: var(--cs-text-primary) !important;
+        font-size: 14px !important;
+        transition: border-color 0.15s ease !important;
+    }
+    .stTextInput > div > div > input:focus,
+    .stTextArea > div > div > textarea:focus {
+        border-color: var(--cs-blue) !important;
+        box-shadow: 0 0 0 2px rgba(66,180,255,0.2) !important;
+    }
+    .stSelectbox > div > div,
+    .stMultiSelect > div > div {
+        background-color: var(--cs-bg-input) !important;
+        border: 1px solid var(--cs-border) !important;
+        border-radius: var(--cs-radius-sm) !important;
+    }
+
+    /* ── Buttons ─────────────────────────────────────────────────────────── */
+    .stButton > button[kind="primary"],
+    .stFormSubmitButton > button {
+        background-color: var(--cs-blue) !important;
+        color: #0f141a !important;
+        border: none !important;
+        border-radius: var(--cs-radius-sm) !important;
+        font-weight: 700 !important;
+        font-size: 14px !important;
+        letter-spacing: 0.01em !important;
+        padding: 6px 20px !important;
+        transition: background-color 0.15s ease, box-shadow 0.15s ease !important;
+    }
+    .stButton > button[kind="primary"]:hover,
+    .stFormSubmitButton > button:hover {
+        background-color: var(--cs-blue-hover) !important;
+        box-shadow: 0 0 0 3px rgba(66,180,255,0.25) !important;
+    }
+    .stButton > button[kind="secondary"],
+    .stDownloadButton > button {
+        background-color: transparent !important;
+        color: var(--cs-text-primary) !important;
+        border: 1px solid var(--cs-border) !important;
+        border-radius: var(--cs-radius-sm) !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+        padding: 5px 20px !important;
+        transition: background-color 0.15s ease, border-color 0.15s ease !important;
+    }
+    .stButton > button[kind="secondary"]:hover,
+    .stDownloadButton > button:hover {
+        background-color: var(--cs-bg-hover) !important;
+        border-color: var(--cs-blue) !important;
+    }
+
+    /* ── Chat messages ───────────────────────────────────────────────────── */
+    [data-testid="stChatMessage"] {
+        background-color: var(--cs-bg-container) !important;
+        border: 1px solid var(--cs-border-subtle) !important;
+        border-radius: var(--cs-radius) !important;
+        padding: 12px 16px !important;
+        margin-bottom: 8px !important;
+        box-shadow: none !important;
+    }
+    [data-testid="stChatInputContainer"],
+    [data-testid="stBottom"] {
+        background-color: var(--cs-bg-page) !important;
+        border-top: 1px solid var(--cs-border) !important;
+        padding-top: 8px !important;
+    }
+    [data-testid="stChatInputContainer"] textarea,
+    [data-testid="stChatInput"] textarea {
+        background-color: var(--cs-bg-input) !important;
+        border: 1px solid var(--cs-border) !important;
+        border-radius: var(--cs-radius) !important;
+        color: var(--cs-text-primary) !important;
+    }
+    [data-testid="stChatInputContainer"] textarea:focus,
+    [data-testid="stChatInput"] textarea:focus {
+        border-color: var(--cs-blue) !important;
+        box-shadow: 0 0 0 2px rgba(66,180,255,0.2) !important;
+    }
+
+    /* ── Expanders ───────────────────────────────────────────────────────── */
+    [data-testid="stExpander"] {
+        background-color: var(--cs-bg-container) !important;
+        border: 1px solid var(--cs-border) !important;
+        border-radius: var(--cs-radius) !important;
+        margin-bottom: 8px !important;
+    }
+    [data-testid="stExpander"] summary {
+        padding: 10px 16px !important;
+        font-weight: 600 !important;
+        font-size: 13px !important;
+        color: var(--cs-text-secondary) !important;
+        border-radius: var(--cs-radius) !important;
+    }
+    [data-testid="stExpander"] summary:hover {
+        color: var(--cs-text-primary) !important;
+        background-color: var(--cs-bg-hover) !important;
+    }
+
+    /* ── Tabs ────────────────────────────────────────────────────────────── */
+    button[data-testid="stTab"] p {
+        color: var(--cs-text-secondary) !important;
+        font-size: 14px !important;
+        font-weight: 600 !important;
+        margin: 0 !important;
+        letter-spacing: 0.01em !important;
+    }
+    button[data-testid="stTab"]:hover p { color: var(--cs-text-primary) !important; }
+    button[data-testid="stTab"][aria-selected="true"] p {
+        color: var(--cs-blue) !important;
+        font-weight: 700 !important;
     }
     [data-baseweb="tab-highlight"] {
-        background-color: #f97316 !important;
+        background-color: var(--cs-blue) !important;
+        height: 2px !important;
     }
-    [data-baseweb="tab-border"] {
-        background-color: #2d2d2d !important;
-    }
+    [data-baseweb="tab-border"] { background-color: var(--cs-border) !important; }
 
-    /* Sticky tab bar — stays accessible while scrolling */
+    /* Sticky tab bar */
     [data-testid="stTabs"] > div:first-child,
     div[data-baseweb="tabs"] > div:first-child,
     div[role="tablist"] {
@@ -130,40 +234,119 @@ st.markdown("""
         position: sticky !important;
         top: 2.75rem !important;
         z-index: 100 !important;
-        background-color: #0e1117 !important;
+        background-color: var(--cs-bg-page) !important;
         padding-bottom: 2px !important;
     }
 
-    /* ── Responsive layout ─────────────────────────────────── */
-    /* Large screens: wider content area */
-    @media (min-width: 1400px) {
-        .block-container { max-width: 1300px !important; }
+    /* ── Dataframe / table ───────────────────────────────────────────────── */
+    .stDataFrame, [data-testid="stDataFrame"] {
+        border: 1px solid var(--cs-border) !important;
+        border-radius: var(--cs-radius) !important;
+        overflow: hidden !important;
     }
-    @media (min-width: 1800px) {
-        .block-container { max-width: 1600px !important; padding-left: 3rem; padding-right: 3rem; }
-        html, body, [class*="css"] { font-size: 16px; }
+    [data-testid="stDataFrame"] thead th {
+        background-color: var(--cs-bg-input) !important;
+        color: var(--cs-text-secondary) !important;
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+        border-bottom: 1px solid var(--cs-border) !important;
     }
 
-    /* Medium screens (laptops ~1280px) */
+    /* ── Metrics ─────────────────────────────────────────────────────────── */
+    [data-testid="stMetric"] {
+        background-color: var(--cs-bg-container) !important;
+        border: 1px solid var(--cs-border) !important;
+        border-radius: var(--cs-radius) !important;
+        padding: 16px 20px !important;
+    }
+    [data-testid="stMetricValue"] {
+        color: var(--cs-text-primary) !important;
+        font-size: 28px !important;
+        font-weight: 300 !important;
+    }
+    [data-testid="stMetricLabel"] {
+        color: var(--cs-text-secondary) !important;
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+    }
+
+    /* ── Alerts ──────────────────────────────────────────────────────────── */
+    .stAlert { border-radius: var(--cs-radius) !important; }
+    [data-testid="stAlert"] {
+        background-color: rgba(66,180,255,0.08) !important;
+        border-color: rgba(66,180,255,0.3) !important;
+    }
+
+    /* ── App-specific components ─────────────────────────────────────────── */
+    .badge-safe {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 2px 10px; border-radius: 12px;
+        background: rgba(41,173,127,0.12); color: #29ad7f;
+        border: 1px solid rgba(41,173,127,0.3);
+        font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+    }
+    .badge-warn {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 2px 10px; border-radius: 12px;
+        background: rgba(240,168,0,0.12); color: #f0a800;
+        border: 1px solid rgba(240,168,0,0.3);
+        font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+    }
+    .badge-blocked {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 2px 10px; border-radius: 12px;
+        background: rgba(209,50,18,0.12); color: #d13212;
+        border: 1px solid rgba(209,50,18,0.3);
+        font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+    }
+    .kb-indicator { font-size: 12px; color: var(--cs-text-muted); margin-top: 6px; }
+    .col-warning {
+        background: rgba(240,168,0,0.08);
+        border: 1px solid rgba(240,168,0,0.25);
+        border-left: 3px solid #f0a800;
+        padding: 8px 12px; border-radius: var(--cs-radius-sm);
+        font-size: 13px; color: #f0a800; margin-bottom: 8px;
+    }
+    .schema-table-name { font-weight: 700; font-size: 13px; color: var(--cs-blue); }
+    .schema-row-count  { font-size: 12px; color: var(--cs-text-muted); }
+
+    /* Follow-up suggestion pills */
+    div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
+        background: rgba(66,180,255,0.08) !important;
+        border: 1px solid rgba(66,180,255,0.3) !important;
+        color: var(--cs-blue) !important;
+        border-radius: 16px !important;
+        font-size: 13px !important;
+        padding: 4px 16px !important;
+        font-weight: 400 !important;
+        transition: background 0.15s ease !important;
+    }
+    div[data-testid="stHorizontalBlock"] button[kind="secondary"]:hover {
+        background: rgba(66,180,255,0.16) !important;
+        border-color: var(--cs-blue) !important;
+    }
+
+    /* ── Responsive ──────────────────────────────────────────────────────── */
+    @media (min-width: 1400px) { .block-container { max-width: 1300px !important; } }
+    @media (min-width: 1800px) {
+        .block-container { max-width: 1600px !important; padding-left: 3rem; padding-right: 3rem; }
+    }
     @media (max-width: 1280px) {
         .block-container { max-width: 100% !important; padding-left: 1rem !important; padding-right: 1rem !important; }
     }
-
-    /* Small screens / tablets */
     @media (max-width: 768px) {
         .block-container { padding: 0.5rem !important; }
         html, body, [class*="css"] { font-size: 13px; }
         [data-testid="stSidebar"] .stSelectbox label,
-        [data-testid="stSidebar"] .stTextInput label { font-size: 0.75rem !important; }
-        button[data-testid="stTab"] p { font-size: 0.8rem !important; }
-        /* Stack viz control bar on narrow screens */
+        [data-testid="stSidebar"] .stTextInput label { font-size: 11px !important; }
+        button[data-testid="stTab"] p { font-size: 13px !important; }
         div[data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
     }
-
-    /* Sidebar scales with viewport — let Streamlit handle collapsing below ~768px */
-    @media (min-width: 1600px) {
-        [data-testid="stSidebar"] { min-width: 320px !important; }
-    }
+    @media (min-width: 1600px) { [data-testid="stSidebar"] { min-width: 320px !important; } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -561,7 +744,7 @@ def _render_result(r: QueryResult, elapsed: float | None = None):
 
     if elapsed is not None:
         st.markdown(
-            f'<div style="font-size:0.88rem;color:#6b7280;margin:4px 0 12px;font-weight:500;">⏱ {elapsed:.1f}s</div>',
+            f'<div style="font-size:0.82rem;color:#a4a4ad;margin:4px 0 12px;font-weight:500;letter-spacing:0.01em;">⏱ {elapsed:.1f}s</div>',
             unsafe_allow_html=True,
         )
 
@@ -658,7 +841,7 @@ def _render_result(r: QueryResult, elapsed: float | None = None):
     # Follow-up suggestions
     if r.followups:
         st.markdown(
-            '<div style="font-size:0.75rem;color:#6b7280;margin-top:12px;margin-bottom:4px;">💡 Suggested follow-ups</div>',
+            '<div style="font-size:0.75rem;color:#a4a4ad;margin-top:12px;margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Suggested follow-ups</div>',
             unsafe_allow_html=True,
         )
         cols = st.columns(len(r.followups))
@@ -676,7 +859,7 @@ with st.sidebar:
     st.divider()
 
     # ── 1. DATABASE ───────────────────────────────────────────────────
-    st.markdown("#### Database")
+    st.markdown('<p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#a4a4ad;margin:0 0 8px;">Database</p>', unsafe_allow_html=True)
     _conn_options = ["DuckDB", "PostgreSQL", "Exasol (pyexasol)", "SQLAlchemy URL"]
     conn_type = st.selectbox("Connection type", _conn_options)
 
@@ -727,7 +910,7 @@ with st.sidebar:
     st.divider()
 
     # ── 2. ACCESS CONTROL (includes schema selector) ──────────────────
-    st.markdown("#### Access Control")
+    st.markdown('<p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#a4a4ad;margin:8px 0 8px;">Access Control</p>', unsafe_allow_html=True)
 
     # Schema selector
     if conn_type == "Exasol (pyexasol)":
@@ -1039,7 +1222,7 @@ _n_tables = len(_chat_ref.schema_context.tables)
 st.markdown(
     f'<div style="position:fixed;top:0.45rem;right:1.2rem;z-index:9999;'
     f'background:#0d1f0d;border:1px solid rgba(34,197,94,0.55);border-radius:6px;'
-    f'padding:3px 12px;font-size:0.72rem;color:#22c55e;font-weight:600;'
+    f'padding:3px 12px;font-size:0.72rem;color:#29ad7f;font-weight:600;'
     f'letter-spacing:0.03em;box-shadow:0 1px 4px rgba(0,0,0,0.4);">'
     f'✅ {_dial} · {_n_tables} tables</div>',
     unsafe_allow_html=True,
@@ -1066,7 +1249,7 @@ _stc.html(
                     el.style.position  = 'sticky';
                     el.style.top       = '2.75rem';
                     el.style.zIndex    = '100';
-                    el.style.background = '#0e1117';
+                    el.style.background = '#161d26';
                     el.style.paddingBottom = '2px';
                     break;
                 }
@@ -1234,7 +1417,7 @@ with tab_schema:
 <meta charset="utf-8">
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <style>
-  html, body {{ margin: 0; padding: 8px; background: #0e1117; overflow: auto; box-sizing: border-box; }}
+  html, body {{ margin: 0; padding: 8px; background: #161d26; overflow: auto; box-sizing: border-box; }}
   #diagram {{ display: flex; justify-content: center; align-items: flex-start; }}
   #diagram svg {{ max-width: 100% !important; height: auto !important; }}
   #errmsg {{ color: #f88; font-family: monospace; white-space: pre-wrap; padding: 12px; }}
@@ -1285,7 +1468,7 @@ with tab_schema:
     col_jp, col_nj = st.columns(2)
 
     with col_jp:
-        st.markdown("#### ✅ Detected join paths")
+        st.markdown('<p style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#29ad7f;margin:16px 0 8px;">✅ Detected join paths</p>', unsafe_allow_html=True)
         if jmap["joins"]:
             for j in jmap["joins"]:
                 badge_color = "#22c55e" if j["match"] == "exact" else "#fb923c"
@@ -1299,7 +1482,7 @@ with tab_schema:
             st.caption("No shared columns detected between any table pair.")
 
     with col_nj:
-        st.markdown("#### ⚠️ No direct join path")
+        st.markdown('<p style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#f0a800;margin:16px 0 8px;">⚠ No direct join path</p>', unsafe_allow_html=True)
         if jmap["no_join"]:
             st.caption(
                 "These pairs share no column — requires an intermediate table. "
@@ -1308,7 +1491,7 @@ with tab_schema:
             for t1, t2 in jmap["no_join"]:
                 st.markdown(
                     f'`{t1}` **↔** `{t2}` '
-                    '<span style="color:#ef4444;font-size:0.74rem">no shared column</span>',
+                    '<span style="color:#d13212;font-size:0.74rem">no shared column</span>',
                     unsafe_allow_html=True,
                 )
         else:
