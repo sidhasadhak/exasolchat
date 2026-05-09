@@ -1,0 +1,100 @@
+[
+  {
+    "id": "seg_equal_range_width_bucket",
+    "title": "Equal-range segmentation with WIDTH_BUCKET",
+    "intent_tags": [
+      "equal ranges", "equal range segments", "equal width buckets", "fixed dollar range",
+      "equal dollar spans", "histogram segments", "value range buckets", "range-based groups",
+      "segment by value range", "equal interval", "width bucket", "widthbucket",
+      "5 groups equal ranges", "10 groups equal ranges", "bucket by range",
+      "split into equal ranges", "divide into equal ranges"
+    ],
+    "sql_features": ["cte", "aggregation"],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "WITH customer_sales AS (SELECT orders.customer_id, SUM(order_items.price) AS total_sales FROM orders JOIN order_items ON orders.order_id = order_items.order_id GROUP BY orders.customer_id), bounds AS (SELECT MIN(total_sales) AS min_sales, MAX(total_sales) AS max_sales FROM customer_sales), segmented AS (SELECT cs.customer_id, cs.total_sales, WIDTH_BUCKET(cs.total_sales, b.min_sales, b.max_sales + 0.01, 5) AS segment FROM customer_sales cs CROSS JOIN bounds b) SELECT s.segment, MIN(s.total_sales) AS segment_min, MAX(s.total_sales) AS segment_max, COUNT(DISTINCT s.customer_id) AS customers, COUNT(DISTINCT o.order_id) AS unique_orders FROM segmented s JOIN orders o ON s.customer_id = o.customer_id GROUP BY s.segment ORDER BY s.segment",
+    "when_to_use": [
+      "user asks to create N groups with equal ranges, equal dollar spans, or equal width intervals",
+      "histogram-style segmentation where each bucket covers the same value range (e.g. $0-$200, $200-$400, ...)",
+      "the question uses words like: equal ranges, equal intervals, equal width, fixed range, range-based buckets",
+      "user wants to see how many customers / orders fall in each dollar range",
+      "comparing volume in low-value vs high-value buckets with uniform bucket width"
+    ],
+    "anti_patterns": [
+      "using NTILE for equal-range segmentation — NTILE creates equal-COUNT groups (same number of rows per bucket), not equal-VALUE-RANGE groups; bucket boundaries will be uneven",
+      "WIDTH_BUCKET(value, min, max, n) — the upper bound is EXCLUSIVE; the maximum value falls into bucket n+1 (out of range). Always add a small epsilon: WIDTH_BUCKET(value, min_val, max_val + 0.01, n) to keep the maximum value inside bucket n",
+      "hard-coding min/max values — always compute them dynamically with a CTE (WITH bounds AS ...) so the ranges adjust automatically when data changes",
+      "forgetting CROSS JOIN bounds — the bounds CTE must be joined to every row; omitting this causes a syntax or logic error"
+    ],
+    "notes": [
+      "WIDTH_BUCKET returns integer bucket numbers starting at 1. Bucket 0 means below the lower bound; bucket n+1 means above the upper bound — both indicate an epsilon miscalculation.",
+      "To show the actual value range per bucket use MIN(value) and MAX(value) within each bucket group.",
+      "For revenue / spend segmentation the epsilon is typically + 0.01 (cents). For integer metrics like order count use + 1."
+    ],
+    "related_patterns": ["seg_equal_count_ntile", "stat_histogram"]
+  },
+  {
+    "id": "seg_equal_count_ntile",
+    "title": "Equal-count segmentation with NTILE (balanced groups)",
+    "intent_tags": [
+      "equal size groups", "equal count groups", "balanced segments", "same number of customers per group",
+      "evenly distributed groups", "ntile", "quartile", "quintile", "decile", "percentile rank groups",
+      "top 20 percent", "bottom 20 percent", "split evenly", "divide customers equally",
+      "equal number per bucket", "balanced buckets", "rank-based segments"
+    ],
+    "sql_features": ["window"],
+    "difficulty": "beginner",
+    "pattern_type": "analytical",
+    "template": "WITH customer_sales AS (SELECT orders.customer_id, SUM(order_items.price) AS total_sales FROM orders JOIN order_items ON orders.order_id = order_items.order_id GROUP BY orders.customer_id) SELECT customer_id, total_sales, NTILE(5) OVER (ORDER BY total_sales) AS segment, MIN(total_sales) OVER (PARTITION BY NTILE(5) OVER (ORDER BY total_sales)) AS segment_min, MAX(total_sales) OVER (PARTITION BY NTILE(5) OVER (ORDER BY total_sales)) AS segment_max FROM customer_sales ORDER BY total_sales",
+    "when_to_use": [
+      "user asks to split customers into N equal-sized groups (same number of customers in each bucket)",
+      "creating quintiles, deciles, quartiles, or percentile-rank tiers",
+      "the question uses words like: equal groups, evenly split, same number per group, balanced segments, top 20%, bottom 20%",
+      "ranking customers for targeted outreach where you need a fixed number per cohort"
+    ],
+    "anti_patterns": [
+      "using NTILE for equal-range (histogram) segmentation — NTILE balances row count, not value range; a luxury segment and a budget segment may span very different dollar amounts",
+      "expecting NTILE bucket boundaries to be meaningful dollar thresholds — they will not be; use WIDTH_BUCKET when even value intervals matter",
+      "using NTILE when you want to describe segments as '$0-$200', '$200-$400' etc — those are equal-range requirements, use WIDTH_BUCKET instead"
+    ],
+    "notes": [
+      "NTILE(4) = quartiles, NTILE(5) = quintiles, NTILE(10) = deciles.",
+      "When the row count is not perfectly divisible by N, NTILE distributes the remainder to the first buckets (they get one extra row each).",
+      "NTILE cannot be nested inside another window function in a single SELECT — use a CTE to compute NTILE first, then reference it."
+    ],
+    "related_patterns": ["seg_equal_range_width_bucket", "stat_histogram"]
+  },
+  {
+    "id": "seg_choice_guide",
+    "title": "Choosing WIDTH_BUCKET vs NTILE: decision guide",
+    "intent_tags": [
+      "width bucket vs ntile", "equal range vs equal count", "histogram vs quantile",
+      "which segmentation function", "bucket customers", "segment customers by sales",
+      "group customers into buckets", "customer tiers", "segment by spend",
+      "5 segments", "10 segments", "create customer segments"
+    ],
+    "sql_features": ["cte", "window", "aggregation"],
+    "difficulty": "intermediate",
+    "pattern_type": "analytical",
+    "template": "-- DECISION: does the user want equal VALUE RANGES or equal GROUP SIZES?\n-- Equal ranges (e.g. $0-$200, $200-$400) → WIDTH_BUCKET\n--   WITH bounds AS (SELECT MIN(v) AS lo, MAX(v) AS hi FROM t)\n--   SELECT WIDTH_BUCKET(v, lo, hi + 0.01, 5) AS bucket FROM t CROSS JOIN bounds\n-- Equal sizes (same number of rows per group) → NTILE\n--   SELECT NTILE(5) OVER (ORDER BY v) AS bucket FROM t\n\n-- Full equal-range example:\nWITH customer_sales AS (SELECT orders.customer_id, SUM(order_items.price) AS total_sales FROM orders JOIN order_items ON orders.order_id = order_items.order_id GROUP BY orders.customer_id), bounds AS (SELECT MIN(total_sales) AS min_sales, MAX(total_sales) AS max_sales FROM customer_sales), segmented AS (SELECT cs.customer_id, cs.total_sales, WIDTH_BUCKET(cs.total_sales, b.min_sales, b.max_sales + 0.01, 5) AS segment FROM customer_sales cs CROSS JOIN bounds b) SELECT s.segment, MIN(s.total_sales) AS segment_min, MAX(s.total_sales) AS segment_max, COUNT(DISTINCT s.customer_id) AS customers, COUNT(DISTINCT o.order_id) AS unique_orders FROM segmented s JOIN orders o ON s.customer_id = o.customer_id GROUP BY s.segment ORDER BY s.segment",
+    "when_to_use": [
+      "any time user says 'segment', 'bucket', 'group', or 'split' customers/orders/revenue into N groups — first determine WHICH kind of grouping they want",
+      "'equal ranges' / 'equal width' / 'equal intervals' / 'equal dollar spans' / 'equal value range' → WIDTH_BUCKET",
+      "'equal size' / 'equal count' / 'same number' / 'balanced' / 'evenly distributed' / 'quintile' / 'decile' → NTILE",
+      "if the user gives an example like '$0-$200, $200-$400' they want WIDTH_BUCKET",
+      "if the user says 'top 20%' or 'bottom quartile' they want NTILE"
+    ],
+    "anti_patterns": [
+      "defaulting to NTILE for all bucketing requests — NTILE is wrong when the user wants equal dollar/value ranges",
+      "defaulting to WIDTH_BUCKET for all bucketing requests — WIDTH_BUCKET is wrong when the user wants the same number of customers per group",
+      "using GROUP BY value DIV interval — fragile and does not handle dynamic data ranges",
+      "omitting the +0.01 epsilon when using WIDTH_BUCKET — the maximum value always falls into an out-of-range bucket (n+1) without it"
+    ],
+    "notes": [
+      "Key question to ask internally: does the user care about the value span of each bucket (→ WIDTH_BUCKET) or the count of rows in each bucket (→ NTILE)?",
+      "Trigger words for WIDTH_BUCKET: range, interval, span, width, histogram, '$X to $Y'.",
+      "Trigger words for NTILE: equal groups, balanced, evenly, quartile, quintile, decile, percentile, top N%."
+    ],
+    "related_patterns": ["seg_equal_range_width_bucket", "seg_equal_count_ntile", "stat_histogram"]
+  }
+]
