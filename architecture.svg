@@ -1,0 +1,212 @@
+<svg width="960" height="740" viewBox="0 0 960 740" xmlns="http://www.w3.org/2000/svg"
+     font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <filter id="s1" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="5" flood-color="#4F46E5" flood-opacity="0.13"/>
+    </filter>
+    <filter id="s2" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="5" stdDeviation="12" flood-color="#4F46E5" flood-opacity="0.38"/>
+    </filter>
+    <filter id="s3" x="-5%" y="-5%" width="110%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#000" flood-opacity="0.07"/>
+    </filter>
+    <marker id="ad" viewBox="0 0 10 10" refX="5" refY="9" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M1,2 L5,9 L9,2" fill="none" stroke="#94A3B8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="au" viewBox="0 0 10 10" refX="5" refY="1" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M1,8 L5,1 L9,8" fill="none" stroke="#94A3B8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="740" fill="#FAFBFF"/>
+
+  <!-- ══════════════════════════════════════════
+       TOP ROW — USER TYPES
+  ══════════════════════════════════════════ -->
+
+  <!-- Business Users -->
+  <circle cx="168" cy="70" r="42" fill="white" stroke="#E0E7FF" stroke-width="1.5" filter="url(#s1)"/>
+  <circle cx="157" cy="58" r="9" fill="none" stroke="#4F46E5" stroke-width="1.8"/>
+  <path d="M138,82 Q157,70 176,82" fill="none" stroke="#4F46E5" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="178" cy="56" r="8" fill="none" stroke="#818CF8" stroke-width="1.5"/>
+  <path d="M161,78 Q178,67 195,78" fill="none" stroke="#818CF8" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="168" y="130" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1E1B4B" letter-spacing="0.4">BUSINESS USERS</text>
+  <rect x="97"  y="144" width="142" height="24" rx="12" fill="#EEF2FF" stroke="#C7D2FE" stroke-width="1.2"/>
+  <text x="168" y="161" text-anchor="middle" font-size="11" fill="#4338CA" font-weight="600">Streamlit Chat UI</text>
+
+  <!-- Developers -->
+  <circle cx="480" cy="70" r="42" fill="white" stroke="#E0E7FF" stroke-width="1.5" filter="url(#s1)"/>
+  <text x="480" y="56"  text-anchor="middle" font-size="11" font-weight="800" fill="#4F46E5" font-family="monospace">&lt;</text>
+  <text x="480" y="72"  text-anchor="middle" font-size="14" font-weight="800" fill="#4F46E5" font-family="monospace">/</text>
+  <text x="480" y="88"  text-anchor="middle" font-size="11" font-weight="800" fill="#4F46E5" font-family="monospace">&gt;</text>
+  <text x="480" y="130" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1E1B4B" letter-spacing="0.4">DEVELOPERS</text>
+  <rect x="400" y="144" width="160" height="24" rx="12" fill="#EEF2FF" stroke="#C7D2FE" stroke-width="1.2"/>
+  <text x="480" y="161" text-anchor="middle" font-size="11" fill="#4338CA" font-weight="600">Python API · SDK</text>
+
+  <!-- Pipelines / Systems -->
+  <circle cx="792" cy="70" r="42" fill="white" stroke="#E0E7FF" stroke-width="1.5" filter="url(#s1)"/>
+  <rect x="771" y="52" width="42" height="32" rx="4" fill="none" stroke="#4F46E5" stroke-width="1.8"/>
+  <line x1="771" y1="60" x2="813" y2="60" stroke="#4F46E5" stroke-width="1.4"/>
+  <circle cx="777" cy="56" r="1.7" fill="#4F46E5"/>
+  <circle cx="783" cy="56" r="1.7" fill="#4F46E5"/>
+  <path d="M779,68 L784,72 L779,76" fill="none" stroke="#4F46E5" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="787" y1="76" x2="797" y2="76" stroke="#4F46E5" stroke-width="1.8" stroke-linecap="round"/>
+  <text x="792" y="130" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1E1B4B" letter-spacing="0.4">PIPELINES</text>
+  <rect x="728" y="144" width="128" height="24" rx="12" fill="#EEF2FF" stroke="#C7D2FE" stroke-width="1.2"/>
+  <text x="792" y="161" text-anchor="middle" font-size="11" fill="#4338CA" font-weight="600">CLI / Automation</text>
+
+  <!-- Arrows down -->
+  <line x1="168" y1="172" x2="168" y2="256" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <line x1="480" y1="172" x2="480" y2="256" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <line x1="792" y1="172" x2="792" y2="256" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+
+  <!-- ══════════════════════════════════════════
+       PLATFORM — isometric trapezoid
+  ══════════════════════════════════════════ -->
+
+  <!-- Top face -->
+  <polygon points="82,262 878,262 848,478 112,478"
+           fill="#EEF2FF" stroke="#C7D2FE" stroke-width="1.5"/>
+  <!-- Front face (depth illusion) -->
+  <polygon points="112,478 848,478 864,506 96,506"
+           fill="#DDE3FF" stroke="#C7D2FE" stroke-width="1"/>
+  <!-- Left face -->
+  <polygon points="82,262 112,478 96,506 66,290"
+           fill="#C7D2FE" stroke="#C7D2FE" stroke-width="1"/>
+
+  <!-- Rotated label on left edge -->
+  <text transform="translate(74,420) rotate(-75)"
+        font-size="10" font-weight="800" fill="#6366F1" letter-spacing="2.5" opacity="0.75">⚡ EXACHAT</text>
+
+  <!-- ── Connection lines (behind nodes) ── -->
+  <!-- Hub→LLM -->
+  <line x1="437" y1="364" x2="296" y2="320" stroke="#C7D2FE" stroke-width="1.8"/>
+  <!-- Hub→KB -->
+  <line x1="480" y1="322" x2="480" y2="340" stroke="#C7D2FE" stroke-width="1.8"/>
+  <!-- Hub→Schema -->
+  <line x1="523" y1="364" x2="664" y2="320" stroke="#C7D2FE" stroke-width="1.8"/>
+  <!-- Hub→Safety -->
+  <line x1="440" y1="386" x2="298" y2="436" stroke="#C7D2FE" stroke-width="1.8"/>
+  <!-- Hub→AutoCorrect -->
+  <line x1="520" y1="386" x2="662" y2="436" stroke="#C7D2FE" stroke-width="1.8"/>
+
+  <!-- ══ NODE: LLM Backends (upper-left) ══ -->
+  <circle cx="256" cy="312" r="50" fill="white" stroke="#6366F1" stroke-width="2.2" filter="url(#s1)"/>
+  <!-- simple brain outline -->
+  <path d="M256,288 C240,288 228,298 228,310 C224,311 220,315 220,321 C220,327 224,331 228,332 C228,342 237,350 248,350 C251,356 254,360 256,360 C258,360 261,356 264,350 C275,350 284,342 284,332 C288,331 292,327 292,321 C292,315 288,311 284,310 C284,298 272,288 256,288 Z"
+        fill="#EEF2FF" stroke="#6366F1" stroke-width="1.5"/>
+  <line x1="256" y1="288" x2="256" y2="360" stroke="#6366F1" stroke-width="1.2" stroke-dasharray="2,3" opacity="0.5"/>
+  <text x="256" y="337" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3730A3">LLM BACKENDS</text>
+  <text x="256" y="351" text-anchor="middle" font-size="9" fill="#6B7280">Ollama · MLX · OpenAI</text>
+
+  <!-- ══ NODE: Knowledge Base (top-center) ══ -->
+  <circle cx="480" cy="300" r="50" fill="white" stroke="#6366F1" stroke-width="2.2" filter="url(#s1)"/>
+  <!-- book icon -->
+  <rect x="460" y="278" width="40" height="34" rx="3" fill="none" stroke="#6366F1" stroke-width="1.8"/>
+  <line x1="480" y1="278" x2="480" y2="312" stroke="#6366F1" stroke-width="1.5"/>
+  <line x1="464" y1="286" x2="478" y2="286" stroke="#6366F1" stroke-width="1.2"/>
+  <line x1="464" y1="292" x2="478" y2="292" stroke="#6366F1" stroke-width="1.2"/>
+  <line x1="464" y1="298" x2="478" y2="298" stroke="#6366F1" stroke-width="1.2"/>
+  <text x="480" y="333" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3730A3">KNOWLEDGE BASE</text>
+  <text x="480" y="346" text-anchor="middle" font-size="9" fill="#6B7280">RAG · 200+ SQL patterns</text>
+
+  <!-- ══ NODE: Schema Engine (upper-right) ══ -->
+  <circle cx="704" cy="312" r="50" fill="white" stroke="#6366F1" stroke-width="2.2" filter="url(#s1)"/>
+  <!-- grid / table icon -->
+  <rect x="682" y="290" width="44" height="34" rx="3" fill="none" stroke="#6366F1" stroke-width="1.8"/>
+  <line x1="682" y1="300" x2="726" y2="300" stroke="#6366F1" stroke-width="1.4"/>
+  <line x1="697" y1="290" x2="697" y2="324" stroke="#6366F1" stroke-width="1.4"/>
+  <line x1="711" y1="290" x2="711" y2="324" stroke="#6366F1" stroke-width="1.4"/>
+  <rect x="684" y="302" width="11" height="9" rx="1" fill="#EEF2FF"/>
+  <rect x="699" y="302" width="11" height="9" rx="1" fill="#EEF2FF"/>
+  <text x="704" y="345" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3730A3">SCHEMA ENGINE</text>
+  <text x="704" y="358" text-anchor="middle" font-size="9" fill="#6B7280">Introspection · Join detection</text>
+
+  <!-- ══ NODE: QUERY ENGINE — central hub ══ -->
+  <circle cx="480" cy="374" r="58" fill="#4F46E5" stroke="#3730A3" stroke-width="2.5" filter="url(#s2)"/>
+  <circle cx="480" cy="374" r="52" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="1.2"/>
+  <!-- lightning bolt -->
+  <path d="M486,348 L472,374 L482,374 L474,400 L494,370 L483,370 Z"
+        fill="white" opacity="0.92"/>
+  <text x="480" y="410" text-anchor="middle" font-size="11" font-weight="700" fill="white" letter-spacing="0.3">QUERY ENGINE</text>
+  <text x="480" y="424" text-anchor="middle" font-size="9.5" fill="#A5B4FC">Text → SQL → Results</text>
+
+  <!-- ══ NODE: Safety Guard (lower-left) ══ -->
+  <circle cx="258" cy="444" r="44" fill="white" stroke="#6366F1" stroke-width="2.2" filter="url(#s1)"/>
+  <!-- shield -->
+  <path d="M258,424 L272,430 L272,446 C272,455 258,462 258,462 C258,462 244,455 244,446 L244,430 Z"
+        fill="#EEF2FF" stroke="#6366F1" stroke-width="1.8"/>
+  <path d="M251,443 L257,449 L267,437"
+        fill="none" stroke="#6366F1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="258" y="476" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3730A3">SAFETY GUARD</text>
+  <text x="258" y="489" text-anchor="middle" font-size="9" fill="#6B7280">Risk · Validation</text>
+
+  <!-- ══ NODE: Auto-Correct (lower-right) ══ -->
+  <circle cx="702" cy="444" r="44" fill="white" stroke="#6366F1" stroke-width="2.2" filter="url(#s1)"/>
+  <!-- circular arrow -->
+  <path d="M702,424 A20,20 0 1,1 682,444" fill="none" stroke="#6366F1" stroke-width="2"/>
+  <path d="M676,438 L682,444 L688,438" fill="none" stroke="#6366F1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="702" y="476" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3730A3">AUTO-CORRECT</text>
+  <text x="702" y="489" text-anchor="middle" font-size="9" fill="#6B7280">3-attempt retry loop</text>
+
+  <!-- ══════════════════════════════════════════
+       MID CONNECTOR
+  ══════════════════════════════════════════ -->
+
+  <!-- bi-directional arrows -->
+  <line x1="271" y1="510" x2="271" y2="560" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <line x1="283" y1="560" x2="283" y2="510" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#au)"/>
+
+  <line x1="474" y1="510" x2="474" y2="560" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <line x1="486" y1="560" x2="486" y2="510" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#au)"/>
+
+  <line x1="689" y1="510" x2="689" y2="560" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#ad)"/>
+  <line x1="701" y1="560" x2="701" y2="510" stroke="#CBD5E1" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#au)"/>
+
+  <!-- connector pill label -->
+  <rect x="296" y="526" width="368" height="22" rx="11" fill="white" stroke="#E0E7FF" stroke-width="1.5"/>
+  <text x="480" y="542" text-anchor="middle" font-size="10.5" fill="#6366F1" font-weight="600">
+    Read-only · Schema introspection · Dialect-aware SQL
+  </text>
+
+  <!-- ══════════════════════════════════════════
+       BOTTOM — DATABASE BACKENDS
+  ══════════════════════════════════════════ -->
+
+  <rect x="48" y="564" width="864" height="138" rx="16" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5" filter="url(#s3)"/>
+
+  <!-- DB names with brand colours -->
+  <text x="160" y="610" text-anchor="middle" font-size="20" font-weight="900" fill="#F66A00">DuckDB</text>
+  <text x="160" y="628" text-anchor="middle" font-size="9.5" fill="#94A3B8">In-process analytics</text>
+
+  <text x="360" y="610" text-anchor="middle" font-size="20" font-weight="900" fill="#005FAB">Exasol</text>
+  <text x="360" y="628" text-anchor="middle" font-size="9.5" fill="#94A3B8">In-memory OLAP</text>
+
+  <text x="568" y="610" text-anchor="middle" font-size="20" font-weight="900" fill="#336791">PostgreSQL</text>
+  <text x="568" y="628" text-anchor="middle" font-size="9.5" fill="#94A3B8">Open-source RDBMS</text>
+
+  <text x="784" y="610" text-anchor="middle" font-size="20" font-weight="900" fill="#C0392B">SQLAlchemy</text>
+  <text x="784" y="628" text-anchor="middle" font-size="9.5" fill="#94A3B8">Any compatible DB</text>
+
+  <!-- Divider -->
+  <line x1="66" y1="643" x2="894" y2="643" stroke="#E2E8F0" stroke-width="1"/>
+
+  <!-- Feature bullets row 1 -->
+  <text x="126" y="663" font-size="10" fill="#64748B">✓ Auto-schema detection</text>
+  <text x="314" y="663" font-size="10" fill="#64748B">✓ Smart schema index</text>
+  <text x="500" y="663" font-size="10" fill="#64748B">✓ Join-path inference</text>
+  <text x="688" y="663" font-size="10" fill="#64748B">✓ Date cast hints</text>
+
+  <!-- Feature bullets row 2 -->
+  <text x="126" y="682" font-size="10" fill="#64748B">✓ Row-count profiling</text>
+  <text x="314" y="682" font-size="10" fill="#64748B">✓ Dialect-aware SQL</text>
+  <text x="500" y="682" font-size="10" fill="#64748B">✓ Read-only safety</text>
+  <text x="688" y="682" font-size="10" fill="#64748B">✓ SSL / auth support</text>
+
+  <!-- Footer caption -->
+  <text x="480" y="726" text-anchor="middle" font-size="10" fill="#CBD5E1" font-weight="500">
+    exachat · local-first text-to-SQL · runs entirely on your machine · no data leaves your environment
+  </text>
+
+</svg>
