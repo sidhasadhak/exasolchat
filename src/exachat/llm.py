@@ -494,17 +494,38 @@ class MLXBackend(OpenAICompatibleBackend):
         except Exception:
             return False
 
+    @staticmethod
+    def _mlx_lm_available() -> bool:
+        """Return True if mlx_lm is importable in the current Python environment."""
+        import importlib.util
+        return importlib.util.find_spec("mlx_lm") is not None
+
+    _MLX_INSTALL_HINT = (
+        "mlx-lm is not installed in this Python environment.\n\n"
+        "  If you installed via pipx:\n"
+        "      pipx inject exachat mlx-lm\n\n"
+        "  If you installed via pip:\n"
+        "      pip install mlx-lm\n\n"
+        "  Or reinstall with the mlx extra:\n"
+        "      pip install exachat[mlx]"
+    )
+
     def _start_and_wait(self, wait_secs: int = 180) -> bool:
         """Ensure the MLX server is running, starting it if needed.
 
         Blocks until the server responds or *wait_secs* elapses.
         Returns True when the server is reachable.
         Uses a class-level lock so only one spawn attempt runs at a time.
+        Raises RuntimeError immediately if mlx_lm is not installed — no waiting.
         """
         with self.__class__._start_lock:
             # Fast path — already up (maybe started by cli.py or another thread)
             if self._is_up():
                 return True
+
+            # Fail fast — don't wait 180 s just to discover the module is missing
+            if not self._mlx_lm_available():
+                raise RuntimeError(self._MLX_INSTALL_HINT)
 
             port = self._port()
             logger.info("MLX server not running — spawning on port %d …", port)
@@ -514,7 +535,7 @@ class MLXBackend(OpenAICompatibleBackend):
                     [sys.executable, "-m", "mlx_lm", "server",
                      "--model", self.model, "--port", str(port)],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,   # capture so early crashes are logged
                 )
             except Exception as exc:
                 logger.warning("Could not spawn MLX server: %s", exc)
@@ -522,9 +543,17 @@ class MLXBackend(OpenAICompatibleBackend):
 
             deadline = time.time() + wait_secs
             while time.time() < deadline:
-                # Process died unexpectedly
+                # Process died unexpectedly — log stderr so the user knows why
                 if self._proc.poll() is not None:
-                    logger.warning("MLX server process exited early (rc=%s)", self._proc.returncode)
+                    try:
+                        err_out = (self._proc.stderr.read() or b"").decode(errors="replace").strip()
+                    except Exception:
+                        err_out = ""
+                    logger.warning(
+                        "MLX server process exited early (rc=%s)%s",
+                        self._proc.returncode,
+                        f": {err_out}" if err_out else "",
+                    )
                     return False
                 if self._is_up(timeout=1.5):
                     logger.info("MLX server ready at %s", self.base_url)
@@ -539,14 +568,17 @@ class MLXBackend(OpenAICompatibleBackend):
     def ping(self) -> tuple[bool, str]:
         if self._is_up():
             return True, f"MLX server reachable ({self.model})"
-        # Try auto-starting before reporting failure
-        if self._start_and_wait():
+        try:
+            started = self._start_and_wait()
+        except RuntimeError as exc:
+            return False, str(exc)
+        if started:
             return True, f"MLX server started automatically ({self.model})"
         return (
             False,
             f"MLX server could not be started at {self.base_url}. "
-            f"Check that mlx-lm is installed (`pip install mlx-lm`) "
-            f"and that the model '{self.model}' has been downloaded.",
+            f"Check logs for the exact error, or start it manually:\n"
+            f"  python3 -m mlx_lm.server --model {self.model} --port {self._port()}",
         )
 
     def _chat(self, prompt: str, temperature: float = 0.1) -> str:
@@ -581,7 +613,11 @@ class MLXBackend(OpenAICompatibleBackend):
         except httpx.ConnectError:
             # Server not reachable — attempt automatic start, then retry once.
             logger.info("MLX server unreachable — attempting auto-start…")
-            started = self._start_and_wait()
+            try:
+                started = self._start_and_wait()
+            except RuntimeError as exc:
+                # mlx_lm not installed — surface the install hint immediately
+                raise ConnectionError(str(exc)) from None
             if started:
                 try:
                     return _do_request()
@@ -589,6 +625,6 @@ class MLXBackend(OpenAICompatibleBackend):
                     pass
             raise ConnectionError(
                 f"MLX server at {self.base_url} is not running and could not be "
-                f"started automatically. Check that mlx-lm is installed "
-                f"(`pip install mlx-lm`) and that model '{self.model}' is cached."
+                f"started automatically.\n"
+                f"Start it manually: python3 -m mlx_lm.server --model {self.model} --port {self._port()}"
             )
