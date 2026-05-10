@@ -1,0 +1,164 @@
+[
+  {
+    "id": "ts_date_spine_generation",
+    "title": "Date Spine Generation",
+    "intent_tags": [
+      "fill gaps in time series",
+      "missing dates",
+      "generate dates",
+      "date spine",
+      "date series",
+      "calendar spine",
+      "time spine",
+      "missing periods",
+      "date padding",
+      "zero-fill gaps",
+      "time dimension",
+      "date range",
+      "daily rows",
+      "period spine",
+      "date range expansion"
+    ],
+    "sql_features": [
+      "date_trunc",
+      "generate_series",
+      "cross_join",
+      "left_join",
+      "coalesce",
+      "date_diff",
+      "cte"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "time_series",
+    "when_to_use": [
+      "user needs to fill missing dates in a time series (e.g., zero-fill days with no orders)",
+      "building a daily/weekly/monthly calendar for joins before aggregation",
+      "creating a consistent time dimension to ensure no gaps appear in dashboards",
+      "preparing data for time-series forecasting where missing dates break models",
+      "enabling LEFT JOIN from a full date range to sparse event data",
+      "user asks 'how many events per day including days with zero?'"
+    ],
+    "when_not_to_use": [
+      "when data is already complete with no gaps — use as-is or the pattern adds unnecessary rows",
+      "when aggregating at coarser grain than the data frequency (e.g., weekly data has no weekly gaps) — use ts_date_trunc instead",
+      "when joining to precomputed calendar tables in a data warehouse — reuse existing dimensions",
+      "when only filtering by date range without needing intermediate rows — use date_trunc + filter instead",
+      "when working with very long date ranges (>10 years) on low-memory systems — generate_series may exceed memory; consider chunking or external spines",
+      "when building a continuous timeline where actual event timestamps must be preserved — use date_spine only for grain alignment"
+    ],
+    "related_patterns": [
+      "ts_date_trunc",
+      "ts_yoy_comparison",
+      "ts_sessionization",
+      "ts_funnel",
+      "ts_event_sequence"
+    ],
+    "concept_explanation": {
+      "what_it_does": "A date spine is a synthetic table of consecutive dates (or time intervals) generated on the fly using generate_series, then joined with real data to ensure every time bucket appears in the output — even when no event occurred. It prevents gaps from appearing in dashboard visuals or analytics.",
+      "mental_model": "Imagine printing a calendar for all days in 2024 and checking off which days have orders. A date spine creates that blank calendar; joining left ensures every date shows up — days without orders get NULL (or zero after COALESCE).",
+      "key_behavior": "generate_series(start, stop, step) must use compatible types — e.g., generate_series(DATE '2024-01-01', DATE '2024-12-31', INTERVAL '1 day') in DuckDB. The spine is independent of real data; it defines the grain, not the events."
+    },
+    "template": {
+      "minimal": "SELECT generate_series('2024-01-01'::DATE, '2024-01-07'::DATE, INTERVAL '1 day') AS day",
+      "realistic": "-- Daily order count with zero-fill for missing days\nWITH daily_orders AS (\n  SELECT DATE_TRUNC('day', order_date) AS day, COUNT(*) AS orders\n  FROM orders\n  WHERE status = 'completed'\n  GROUP BY 1\n),\ndate_spine AS (\n  SELECT generate_series(\n    (SELECT MIN(day) FROM daily_orders),\n    (SELECT MAX(day) FROM daily_orders),\n    INTERVAL '1 day'\n  )::DATE AS day\n)\nSELECT\n  s.day,\n  COALESCE(o.orders, 0) AS orders\nFROM date_spine s\nLEFT JOIN daily_orders o ON s.day = o.day\nORDER BY s.day",
+      "composable": "-- Revenue by day over last 30 days, including zero days (combines ts_date_spine + seg_case_when_classification)\n-- Composes: ts_date_spine_generation + seg_case_when_classification\nWITH daily_revenue AS (\n  SELECT DATE_TRUNC('day', order_date) AS day, SUM(total) AS revenue\n  FROM orders\n  WHERE status NOT IN ('cancelled', 'test')\n  GROUP BY 1\n),\ndate_spine AS (\n  SELECT generate_series(\n    (SELECT MAX(day) - INTERVAL '29 days' FROM daily_revenue),\n    (SELECT MAX(day) FROM daily_revenue),\n    INTERVAL '1 day'\n  )::DATE AS day\n),\nspined_revenue AS (\n  SELECT\n    s.day,\n    COALESCE(r.revenue, 0) AS revenue\n  FROM date_spine s\n  LEFT JOIN daily_revenue r ON s.day = r.day\n)\nSELECT\n  day,\n  revenue,\n  CASE\n    WHEN revenue = 0 THEN 'no_activity'\n    WHEN revenue < 100 THEN 'low'\n    WHEN revenue < 1000 THEN 'medium'\n    ELSE 'high'\n  END AS activity_tier\nFROM spined_revenue\nORDER BY day"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Missing CAST to DATE for generate_series output",
+        "what_goes_wrong": "generate_series(DATE, DATE, INTERVAL) returns a series of DATEs, but mixing types (e.g., DATE with TIMESTAMP) in JOIN conditions causes implicit casts and index non-use. In DuckDB, if the spine is DATE and data is TIMESTAMP, the JOIN fails or yields fewer rows than expected.",
+        "symptom": "LEFT JOIN returns fewer rows than the spine — some dates are missing. Or query runs but filters out all rows with no matches.",
+        "bad_sql": "SELECT generate_series('2024-01-01', '2024-01-07', INTERVAL '1 day') AS day",
+        "good_sql": "SELECT generate_series('2024-01-01'::DATE, '2024-01-07'::DATE, INTERVAL '1 day')::DATE AS day",
+        "detection_sql": "-- Check if spine and data share the same grain:\nSELECT typeof(day) FROM (SELECT generate_series('2024-01-01', '2024-01-07', INTERVAL '1 day') AS day) LIMIT 1;\nSELECT typeof(order_date) FROM orders LIMIT 1;"
+      },
+      {
+        "mistake": "Using generate_series without filtering to relevant range",
+        "what_goes_wrong": "Generating a full year of dates for a dataset spanning only 7 days wastes memory and CPU. DuckDB materializes the full series in memory before joining; for wide spines, this triggers OOM or excessive swap.",
+        "symptom": "Query runs slowly or crashes with 'out of memory' — especially in interactive environments or with many concurrent users.",
+        "bad_sql": "SELECT generate_series('2020-01-01', '2024-12-31', INTERVAL '1 day') AS day",
+        "good_sql": "SELECT generate_series(\n  (SELECT MIN(order_date) FROM orders),\n  (SELECT MAX(order_date) FROM orders),\n  INTERVAL '1 day'\n) AS day",
+        "detection_sql": "-- Compare spine size to data size:\nSELECT COUNT(*) AS spine_rows FROM (SELECT generate_series('2020-01-01', '2024-12-31', INTERVAL '1 day') AS day);\nSELECT COUNT(DISTINCT DATE_TRUNC('day', order_date)) AS data_days FROM orders;"
+      },
+      {
+        "mistake": "Using RIGHT JOIN instead of LEFT JOIN on spine",
+        "what_goes_wrong": "RIGHT JOIN starts from the real data table, which has gaps — the spine's purpose is violated. You end up with only days that exist in data, defeating zero-fill.",
+        "symptom": "Result set has fewer rows than expected, and missing days reappear — spine is not applied.",
+        "bad_sql": "SELECT s.day, COALESCE(o.orders, 0) FROM date_spine s RIGHT JOIN daily_orders o ON s.day = o.day",
+        "good_sql": "SELECT s.day, COALESCE(o.orders, 0) FROM date_spine s LEFT JOIN daily_orders o ON s.day = o.day",
+        "detection_sql": "-- Verify spine length matches expected gap count:\nSELECT COUNT(*) FROM date_spine;\nSELECT COUNT(*) FROM (SELECT s.day FROM date_spine s LEFT JOIN daily_orders o ON s.day = o.day WHERE o.day IS NULL);"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "generate_series syntax",
+        "duckdb_behavior": "generate_series(start, stop, step) with type-cast start/stop to DATE and INTERVAL step works natively. Supports DATE, TIMESTAMP, and numeric series.",
+        "postgres_behavior": "Same function name and syntax, but requires type-casted arguments (e.g., DATE '2024-01-01'). Very robust in DuckDB and Postgres.",
+        "bigquery_behavior": "Not supported. Uses GENERATE_DATE_ARRAY(start_date, end_date, INTERVAL day) or GENERATE_TIMESTAMP_ARRAY. Different argument order.",
+        "safe_alternative": "Use DuckDB's native syntax. For portability to BigQuery, generate spine in application layer or use a calendar table. Never rely on generate_series for cross-warehouse queries."
+      },
+      {
+        "construct": "NULL handling in COALESCE with LEFT JOIN",
+        "duckdb_behavior": "LEFT JOIN from date_spine yields NULL for missing days. COALESCE(orders, 0) works reliably. No NULL != 0 surprises.",
+        "postgres_behavior": "Same behavior — COALESCE works identically.",
+        "bigquery_behavior": "Same syntax, but if data includes TIMESTAMP and spine is DATE, comparison may fail due to implicit cast mismatch; always align types.",
+        "safe_alternative": "Cast both sides to same type before JOIN: date_spine.day::TIMESTAMP = orders.order_date::DATE. This avoids silent mismatches."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user explicitly asks for missing days/weeks/months filled with zero or last known value",
+        "dashboard needs time-series continuity for trend visualization",
+        "data has gaps due to weekends, holidays, or inactive periods",
+        "user questions 'how many per period including zero?'",
+        "building input for ML time-series models that require dense time grids"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to aggregate by calendar period (e.g., monthly totals) and data is already sparse — gaps don't matter",
+          "use_instead": "ts_date_trunc",
+          "why": "DATE_TRUNC on event timestamps is simpler than generating a full spine; spines are overkill when no gap-filling is needed"
+        },
+        {
+          "condition": "user needs a fixed calendar for fiscal years or non-standard weeks",
+          "use_instead": "ts_fiscal_calendar_mapping",
+          "why": "A lookup table of fiscal periods handles complex rules better than generate_series, which assumes uniform intervals"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "fill in the gaps",
+        "zero days",
+        "missing dates",
+        "no data for X",
+        "including zero",
+        "no rows for holidays",
+        "pad time",
+        "complete timeline",
+        "no missing days",
+        "zero-fill"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Data ends mid-day or contains partial periods",
+        "what_happens": "Spine includes full days, but last day has incomplete events. Left join includes the day, but its metrics are understated.",
+        "handling": "If only full periods matter, filter spine to end at LAST(date) WHERE day = (SELECT MAX(day) FROM daily_events) - INTERVAL '1 day'. Alternatively, aggregate to hour/minute grain if precision matters."
+      },
+      {
+        "scenario": "Date range exceeds 10 years (memory risk)",
+        "what_happens": "generate_series on 3650+ rows may exceed DuckDB’s default memory per query or cause long planning times.",
+        "handling": "Generate spine in chunks (e.g., yearly CTEs) or store a permanent calendar table. Alternatively, limit to ±1 year around MAX(date) if analysis window is recent."
+      },
+      {
+        "scenario": "Timezone-aware data with UTC vs local time",
+        "what_happens": "Spine is generated in local time but events are stored in UTC. The JOIN misaligns days — events on Sunday evening UTC fall on Monday local time.",
+        "handling": "Cast spine and data to same timezone: generate_series(..., INTERVAL '1 day') AT TIME ZONE 'America/New_York'. Use AT TIME ZONE consistently on both sides."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) for spine generation, O(n log n) for the join sort",
+      "when_slow": "Spines spanning >5 years on large datasets (e.g., daily spine for 10 years = 3650 rows; still small, but repeated for many users). Also slow when used in correlated subqueries.",
+      "optimization_hint": "Cache the spine as a permanent table (e.g., dim_dates) if the range is stable. For ad-hoc queries, restrict the spine to [MIN(date) - X, MAX(date)] via subqueries to avoid scanning irrelevant dates."
+    }
+  }
+]

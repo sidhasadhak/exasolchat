@@ -1,0 +1,815 @@
+[
+  {
+    "id": "seg_width_bucket_ntile_guide",
+    "title": "WIDTH_BUCKET vs NTILE Decision Guide",
+    "intent_tags": [
+      "equal range vs equal count",
+      "width bucket vs ntile",
+      "histogram bins",
+      "equal range grouping",
+      "equal population buckets",
+      "quartiles quintiles",
+      "decile analysis",
+      "equal sized groups",
+      "equal width buckets",
+      "quantile buckets",
+      "segmentation choice",
+      "bucket type",
+      "distribution buckets",
+      "value buckets",
+      "count buckets"
+    ],
+    "sql_features": [
+      "width_bucket",
+      "ntile",
+      "partition",
+      "order_by",
+      "case_when",
+      "percentile_cont",
+      "percentile_disc",
+      "sum",
+      "avg",
+      "count_over",
+      "group_by"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "decision_guide",
+    "when_to_use": [
+      "user asks 'should I use equal ranges or equal counts for segmentation?'",
+      "building histograms where bins need equal width (WIDTH_BUCKET) vs equal observations (NTILE)",
+      "segmenting customers into quartiles where business wants 'top 25%' (NTILE) vs 'income $100k–$150k' (WIDTH_BUCKET)",
+      "designing dashboards where users click to see 'middle 50%' (NTILE) or 'scores 70–90' (WIDTH_BUCKET)",
+      "choosing between percentile-based and fixed-threshold buckets"
+    ],
+    "when_not_to_use": [
+      "when buckets must reflect real value clusters — use clustering or density-based methods, not WIDTH_BUCKET/NTILE",
+      "when data is highly skewed and equal-count buckets hide tail behavior — use WIDTH_BUCKET on log-transformed data instead",
+      "when exact quantiles matter (e.g., regulatory thresholds) — use PERCENTILE_CONT/PERCENTILE_DISC directly instead of NTILE",
+      "for time-series segmentation where buckets should adapt to recent data — use rolling quantiles instead of fixed NTILE",
+      "when only two buckets are needed — use CASE WHEN with median, not NTILE(2) or WIDTH_BUCKET(2)",
+      "when null values must be excluded — both functions handle NULLs differently; NTILE skips them, WIDTH_BUCKET treats them as outliers"
+    ],
+    "related_patterns": [
+      "seg_case_when_classification",
+      "seg_dynamic_thresholds",
+      "stat_percentile_distribution",
+      "stat_histogram_width",
+      "stat_anomaly_threshold_bands"
+    ],
+    "concept_explanation": {
+      "what_it_does": "WIDTH_BUCKET assigns rows to bins of equal *value range* (e.g., $0–$100, $100–$200), while NTILE assigns rows to bins of equal *count* (e.g., top 25%, next 25%). WIDTH_BUCKET reflects data distribution; NTILE ensures balanced groups. They answer different business questions.",
+      "mental_model": "WIDTH_BUCKET is like cutting a ruler into equal-length segments — each segment covers $100 regardless of how many people fall in it. NTILE is like dealing cards evenly — each bucket gets the same number of cards, even if some ranges are denser. Ruler vs dealing.",
+      "key_behavior": "WIDTH_BUCKET(key, min, max, nbuckets) requires explicit min/max — if data exceeds range, it returns 0 or nbuckets+1. NTILE(n) on n rows returns bucket 1–n, but with remainder rows distributed one-per-bucket from left."
+    },
+    "template": {
+      "minimal": "-- WIDTH_BUCKET: equal value range\nSELECT width_bucket(revenue, 0, 1000, 10) AS revenue_bucket FROM sales;\n-- NTILE: equal count\nSELECT ntile(4) OVER (ORDER BY revenue) AS quartile FROM sales;",
+      "realistic": "-- Compare WIDTH_BUCKET vs NTILE for revenue segmentation\nWITH sales_summary AS (\n  SELECT\n    customer_id,\n    SUM(order_total) AS revenue\n  FROM orders\n  WHERE order_date >= '2024-01-01'\n  GROUP BY 1\n),\nrevenue_stats AS (\n  SELECT\n    MIN(revenue) AS min_rev,\n    MAX(revenue) AS max_rev\n  FROM sales_summary\n),\nwidth_segments AS (\n  SELECT\n    customer_id,\n    revenue,\n    width_bucket(revenue, 0, 1000, 5) AS width_bucket -- $0–200, $200–400, ..., >1000\n  FROM sales_summary\n),\nntile_segments AS (\n  SELECT\n    customer_id,\n    revenue,\n    ntile(5) OVER (ORDER BY revenue) AS ntile_bucket\n  FROM sales_summary\n)\nSELECT\n  'WIDTH_BUCKET' AS method,\n  revenue_bucket AS segment,\n  COUNT(*) AS customers,\n  AVG(revenue) AS avg_revenue,\n  MIN(revenue) AS min_rev,\n  MAX(revenue) AS max_rev\nFROM width_segments\nWHERE revenue BETWEEN 0 AND 1000\nGROUP BY 1, 2\nUNION ALL\nSELECT\n  'NTILE' AS method,\n  ntile_bucket AS segment,\n  COUNT(*) AS customers,\n  AVG(revenue) AS avg_revenue,\n  MIN(revenue) AS min_rev,\n  MAX(revenue) AS max_rev\nFROM ntile_segments\nGROUP BY 1, 2\nORDER BY method, segment;",
+      "composable": "-- Revenue segmentation for campaign targeting (combines seg_width_bucket_ntile_guide + seg_case_when_classification)\n-- Composes: seg_width_bucket_ntile_guide + seg_case_when_classification\nWITH sales_summary AS (\n  SELECT\n    customer_id,\n    SUM(order_total) AS revenue\n  FROM orders\n  WHERE order_date >= '2024-01-01'\n  GROUP BY 1\n),\nrevenue_stats AS (\n  SELECT\n    MIN(revenue) AS min_rev,\n    MAX(revenue) AS max_rev\n  FROM sales_summary\n),\ncombined AS (\n  SELECT\n    s.customer_id,\n    s.revenue,\n    -- WIDTH_BUCKET for value-range segments\n    CASE\n      WHEN width_bucket(s.revenue, COALESCE(rs.min_rev, 0), COALESCE(rs.max_rev, 10000), 10) BETWEEN 1 AND 3 THEN 'low_value'\n      WHEN width_bucket(s.revenue, COALESCE(rs.min_rev, 0), COALESCE(rs.max_rev, 10000), 10) BETWEEN 4 AND 7 THEN 'mid_value'\n      ELSE 'high_value'\n    END AS range_segment,\n    -- NTILE for population segments\n    CASE\n      WHEN ntile(4) OVER (ORDER BY s.revenue) = 1 THEN 'bottom_quartile'\n      WHEN ntile(4) OVER (ORDER BY s.revenue) = 2 THEN 'second_quartile'\n      WHEN ntile(4) OVER (ORDER BY s.revenue) = 3 THEN 'third_quartile'\n      ELSE 'top_quartile'\n    END AS population_segment\n  FROM sales_summary s\n  CROSS JOIN revenue_stats rs\n)\nSELECT\n  range_segment,\n  population_segment,\n  COUNT(*) AS customers,\n  AVG(revenue) AS avg_revenue,\n  ROUND(STDDEV(revenue), 2) AS stddev_revenue\nFROM combined\nGROUP BY 1, 2\nORDER BY range_segment, population_segment"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using NTILE on small partitions",
+        "what_goes_wrong": "If a partition has fewer rows than NTILE(n), some buckets are empty. E.g., NTILE(4) on 2 rows yields buckets 1 and 2 only — no 3 or 4. Users expect quartiles but see gaps.",
+        "symptom": "Segment counts don't add up; charts show 'missing' segments. Queries filtering ntile_bucket = 4 return no rows even though data exists.",
+        "bad_sql": "SELECT customer_id, ntile(4) OVER (ORDER BY revenue) AS quartile FROM top_customers WHERE region = 'West' AND COUNT(*) < 4;",  
+        "good_sql": "SELECT customer_id, NTILE(GREATEST(1, (SELECT LEAST(4, COUNT(*)) FROM top_customers WHERE region = 'West'))) OVER (ORDER BY revenue) AS quartile FROM top_customers WHERE region = 'West';",
+        "detection_sql": "-- Check if any bucket is missing:\nWITH buckets AS (\n  SELECT ntile(4) OVER (ORDER BY revenue) AS quartile FROM top_customers WHERE region = 'West'\n)\nSELECT GENERATE_SERIES(1, 4) AS expected_bucket\nEXCEPT\nSELECT quartile FROM buckets;"
+      },
+      {
+        "mistake": "Assuming WIDTH_BUCKET handles NULLs gracefully",
+        "what_goes_wrong": "WIDTH_BUCKET(NULL, min, max, nbuckets) returns NULL. If the key column has NULLs, those rows get no bucket — silent exclusion from analysis.",
+        "symptom": "Row count in segments is less than total rows; NULLs are invisible in output.",
+        "bad_sql": "SELECT width_bucket(revenue, 0, 1000, 5) AS rev_bucket FROM sales;",  
+        "good_sql": "SELECT width_bucket(COALESCE(revenue, 0), 0, 1000, 5) AS rev_bucket FROM sales;\n-- Or filter NULLs first:\nSELECT width_bucket(revenue, 0, 1000, 5) AS rev_bucket FROM sales WHERE revenue IS NOT NULL;",
+        "detection_sql": "SELECT COUNT(*) FROM sales WHERE revenue IS NULL;\nSELECT COUNT(*) FROM (SELECT width_bucket(revenue, 0, 1000, 5) AS rev_bucket FROM sales) WHERE rev_bucket IS NULL;"
+      },
+      {
+        "mistake": "Mixing min/max in WIDTH_BUCKET with actual data range",
+        "what_goes_wrong": "If data contains values beyond [min, max], they map to bucket 0 or nbuckets+1. Users often miss this and think their high-value customers are 'out of range' instead of bucketed.",
+        "symptom": "Unexpected bucket 0 or bucket 6 (for 5 buckets) — users can't interpret these values.",
+        "bad_sql": "SELECT width_bucket(revenue, 0, 1000, 5) FROM sales;",  
+        "good_sql": "SELECT width_bucket(revenue, (SELECT MIN(revenue) FROM sales), (SELECT MAX(revenue) FROM sales), 5) FROM sales;\n-- Or cap outliers:\nSELECT width_bucket(LEAST(GREATEST(revenue, 0), 1000), 0, 1000, 5) FROM sales;",
+        "detection_sql": "-- Find rows outside expected range:\nSELECT COUNT(*) FROM sales WHERE revenue < 0 OR revenue > 1000;"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "WIDTH_BUCKET in BigQuery",
+        "duckdb_behavior": "Built-in function: width_bucket(value, min, max, num_buckets). Returns 1–nbuckets or 0 and nbuckets+1 for outliers.",
+        "postgres_behavior": "Not supported — throws error. Use a CTE with WIDTH_BUCKET emulation or PERCENT_RANK.",
+        "bigquery_behavior": "Not supported — error. Use NTILE, width_bucket emulation, or CASE WHEN with PRECENTILE_CONT.",
+        "safe_alternative": "In BigQuery, use NTILE or PERCENT_RANK. For equal-width buckets, compute range boundaries: MIN + (MAX-MIN)/nbuckets * bucket_id."
+      },
+      {
+        "construct": "NTILE with PARTITION BY",
+        "duckdb_behavior": "NTILE works with PARTITION BY — each partition gets its own buckets. If a partition has fewer rows than nbuckets, some buckets are empty.",
+        "postgres_behavior": "Same — but older versions have bugs with PARTITION BY in NTILE; test first.",
+        "bigquery_behavior": "Supported and stable. Handles partitions correctly.",
+        "safe_alternative": "Always verify bucket distribution per partition: SELECT partition_col, ntile_bucket, COUNT(*) GROUP BY 1,2. If any count=0, consider adaptive bucketing."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants segments where *every bucket has roughly the same number of customers* — use NTILE",
+        "user wants segments based on *fixed value ranges* (e.g., $0–$100, $100–$200) — use WIDTH_BUCKET",
+        "building marketing campaigns targeting 'top quartile' (NTILE) vs 'spenders $500+ (WIDTH_BUCKET)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants equal-probability quantiles (e.g., 10th, 50th, 90th percentile)",
+          "use_instead": "stat_percentile_distribution",
+          "why": "PERCENTILE_CONT gives exact quantiles; NTILE only approximates them with integer buckets"
+        },
+        {
+          "condition": "user needs adaptive thresholds that change with data distribution (e.g., quarterly rebased)",
+          "use_instead": "seg_dynamic_thresholds",
+          "why": "Dynamic thresholds recompute from recent data; NTILE/width_bucket use static min/max or fixed quantiles"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "same number per group",
+        "top 25% customers",
+        "equal counts",
+        "same dollar ranges",
+        "fixed bucket size",
+        "histogram equal width",
+        "quartile by count"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Zero variance in key column (all values identical)",
+        "what_happens": "WIDTH_BUCKET returns 1 for all rows (min=max, so only one bin fits all). NTILE returns 1 for all rows if nbuckets > count, or distributes 1–n if nbuckets <= count.",
+        "handling": "Check variance first: SELECT COUNT(DISTINCT key) FROM table. If 1, skip segmentation or use a different dimension."
+      },
+      {
+        "scenario": "Highly skewed data (e.g., power-law revenue)",
+        "what_happens": "WIDTH_BUCKET over-represents low ranges; NTILE splits the long tail into tiny buckets. Both hide the actual distribution.",
+        "handling": "Transform the key before segmentation: WIDTH_BUCKET(LOG10(revenue + 1), 0, MAX_LOG, nbuckets). Or use log-spaced bins manually."
+      },
+      {
+        "scenario": "Data updates change min/max significantly between runs",
+        "what_happens": "WIDTH_BUCKET buckets shift meaning — today's bucket 3 ($100–$200) might be $500–$1000 tomorrow. NTILE buckets stay stable relative to current data.",
+        "handling": "Use NTILE for dynamic systems where thresholds shouldn’t re-baseline. Or compute min/max from a fixed training period (e.g., last 90 days) for WIDTH_BUCKET."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "WIDTH_BUCKET: O(n) for scan + O(1) per row; NTILE: O(n log n) for sort + O(n) scan",
+      "when_slow": "NTILE on large partitions (>10M rows) — sort dominates. WIDTH_BUCKET is fast but slow if min/max computed with subqueries on huge tables.",
+      "optimization_hint": "Cache min/max in a CTE for WIDTH_BUCKET. Pre-aggregate partitions in CTEs before applying NTILE. Use EXPLAIN to verify DuckDB uses index scans where possible."
+    }
+  },
+  {
+    "id": "seg_case_when_classification",
+    "title": "CASE WHEN Classification",
+    "intent_tags": [
+      "business rule encoding",
+      "segmentation logic",
+      "classification rules",
+      "conditional categories",
+      "CASE WHEN patterns",
+      "priority logic",
+      "ordered CASE",
+      " ELSE default",
+      "NULL fall-through",
+      "business logic",
+      "category assignment",
+      "discrete buckets",
+      "rule-based segment",
+      "tiering rules",
+      "business taxonomy"
+    ],
+    "sql_features": [
+      "case_when",
+      "conditional_aggregation",
+      "where",
+      "group_by",
+      "order_by",
+      "partition",
+      "sum",
+      "count",
+      "avg",
+      "min",
+      "max",
+      "window",
+      "cte"
+    ],
+    "difficulty": "beginner",
+    "pattern_type": "classification",
+    "when_to_use": [
+      "user needs to map metrics to business categories (e.g., 'High', 'Medium', 'Low' risk)",
+      "classifying customers by RFM scores or rule-based tiers",
+      "segmenting products by margin, growth, or strategic importance",
+      "flagging anomalies where simple thresholds apply (e.g., >1000 = 'outlier')",
+      "encoding business rules into analytical queries for dashboards"
+    ],
+    "when_not_to_use": [
+      "when more than 100 distinct categories — use a lookup table or join instead",
+      "when thresholds should adapt to data distribution — use dynamic thresholds via PERCENTILE_CONT instead",
+      "when logic must change per segment size — use NTILE or WIDTH_BUCKET",
+      "for time-series thresholds (e.g., moving z-scores) — use window functions with dynamic baselines",
+      "when rules are too complex for SQL — offload to application layer or ML model"
+    ],
+    "related_patterns": [
+      "seg_width_bucket_ntile_guide",
+      "seg_dynamic_thresholds",
+      "seg_multi_dimensional_scoring",
+      "stat_anomaly_threshold_bands",
+      "stat_z_score_detection"
+    ],
+    "concept_explanation": {
+      "what_it_does": "CASE WHEN evaluates conditions in order and returns the first matching value. It’s the most common way to encode business rules directly in SQL — e.g., IF score > 80 THEN 'Gold' ELSE 'Silver'. Its ordered nature means top-down priority matters.",
+      "mental_model": "It’s like reading a decision tree from top to bottom. The first rule that's TRUE wins — others are skipped. If no rule matches, ELSE provides a fallback. It’s a prioritized if-else chain.",
+      "key_behavior": "CASE WHEN evaluates *in order*. Placing a broad condition (e.g., revenue > 0) before a narrow one (revenue > 1000) will cause the narrow rule to never trigger. Always order from most-specific to least-specific."
+    },
+    "template": {
+      "minimal": "SELECT\n  customer_id,\n  revenue,\n  CASE\n    WHEN revenue > 10000 THEN 'Platinum'\n    WHEN revenue > 5000 THEN 'Gold'\n    WHEN revenue > 1000 THEN 'Silver'\n    ELSE 'Bronze'\n  END AS tier\nFROM customers;",
+      "realistic": "-- Customer segmentation for marketing campaigns based on RFM-like scores\nWITH customer_scores AS (\n  SELECT\n    customer_id,\n    SUM(CASE WHEN order_date >= CURRENT_DATE - INTERVAL '90 days' THEN order_total ELSE 0 END) AS recency_score,\n    COUNT(DISTINCT order_id) AS frequency_score,\n    SUM(order_total) AS monetary_score\n  FROM orders\n  WHERE status = 'completed'\n  GROUP BY 1\n),\nclassified AS (\n  SELECT\n    customer_id,\n    recency_score,\n    frequency_score,\n    monetary_score,\n    CASE\n      WHEN recency_score > 500 AND frequency_score > 10 AND monetary_score > 2000 THEN 'Champion'\n      WHEN recency_score > 500 AND frequency_score > 5 THEN 'Loyal'\n      WHEN recency_score > 500 THEN 'Recent'\n      WHEN frequency_score > 5 THEN 'Active'\n      WHEN monetary_score > 500 THEN 'Spender'\n      ELSE 'At Risk'\n    END AS segment,\n    CASE\n      WHEN recency_score > 500 THEN 'High engagement'\n      WHEN recency_score > 100 THEN 'Medium engagement'\n      ELSE 'Low engagement'\n    END AS engagement\n  FROM customer_scores\n)\nSELECT\n  segment,\n  engagement,\n  COUNT(*) AS customers,\n  AVG(monetary_score) AS avg_monetary,\n  SUM(monetary_score) AS total_revenue\nFROM classified\nGROUP BY 1, 2\nORDER BY total_revenue DESC;",
+      "composable": "-- Campaign prioritization (combines seg_case_when_classification + dq_time_filter_before_window)\n-- Composes: seg_case_when_classification + dq_time_filter_before_window\nWITH customer_metrics AS (\n  SELECT\n    customer_id,\n    SUM(CASE WHEN order_date >= CURRENT_DATE - INTERVAL '30 days' THEN order_total ELSE 0 END) AS recent_revenue,\n    COUNT(DISTINCT CASE WHEN order_date >= CURRENT_DATE - INTERVAL '30 days' THEN order_id END) AS recent_orders,\n    SUM(CASE WHEN order_date < CURRENT_DATE - INTERVAL '90 days' THEN order_total ELSE 0 END) AS legacy_revenue\n  FROM orders\n  WHERE order_date >= CURRENT_DATE - INTERVAL '1 year'\n  GROUP BY 1\n),\nwith_classification AS (\n  SELECT\n    customer_id,\n    recent_revenue,\n    recent_orders,\n    legacy_revenue,\n    CASE\n      WHEN recent_revenue > 500 THEN 'High_priority'\n      WHEN recent_orders > 3 THEN 'Medium_priority'\n      WHEN legacy_revenue > 1000 THEN 'Legacy_interest'\n      ELSE 'Low_priority'\n    END AS campaign_priority\n  FROM customer_metrics\n)\nSELECT\n  campaign_priority,\n  COUNT(*) AS customers,\n  ROUND(AVG(recent_revenue), 2) AS avg_recent_revenue\nFROM with_classification\nGROUP BY 1\nORDER BY avg_recent_revenue DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Ordering CASE WHEN from least-specific to most-specific",
+        "what_goes_wrong": "If a condition like revenue > 0 appears before revenue > 1000, the first condition matches *all* rows — subsequent rules never trigger. The query silently implements wrong logic.",
+        "symptom": "All rows receive the same category (the first one), or high-value segments are underrepresented.",
+        "bad_sql": "SELECT CASE WHEN revenue > 0 THEN 'All' WHEN revenue > 1000 THEN 'High' END FROM data;",  
+        "good_sql": "SELECT CASE WHEN revenue > 1000 THEN 'High' WHEN revenue > 0 THEN 'All' END FROM data;",
+        "detection_sql": "SELECT revenue, CASE WHEN revenue > 0 THEN 'All' WHEN revenue > 1000 THEN 'High' END AS cat FROM data GROUP BY 1,2 HAVING COUNT(*) > 0 ORDER BY revenue;"
+      },
+      {
+        "mistake": "Using ELSE too early — it short-circuits subsequent rules",
+        "what_goes_wrong": "Placing ELSE before all specific conditions makes all rows fall into ELSE. CASE WHEN stops at the first match, so anything after ELSE is ignored.",
+        "symptom": "Specific categories never appear, even when data supports them.",
+        "bad_sql": "SELECT CASE WHEN revenue > 500 THEN 'Mid' ELSE 'Low' WHEN revenue > 1000 THEN 'High' END FROM data;",  
+        "good_sql": "SELECT CASE WHEN revenue > 1000 THEN 'High' WHEN revenue > 500 THEN 'Mid' ELSE 'Low' END FROM data;",
+        "detection_sql": "SELECT COUNT(*) FROM data WHERE revenue > 1000;\nSELECT COUNT(*) FROM (above query) WHERE cat = 'High'; -- Should match above count"
+      },
+      {
+        "mistake": "Assuming CASE WHEN handles NULLs like zero",
+        "what_goes_wrong": "NULL comparisons in CASE WHEN return NULL (not TRUE/FALSE), so rules with NULL conditionals never trigger unless explicitly handled. E.g., revenue > 1000 is NULL when revenue is NULL — falls through to ELSE.",
+        "symptom": "NULL values in key columns get classified as 'Other' or the first ELSE match, hiding data issues.",
+        "bad_sql": "SELECT CASE WHEN revenue > 1000 THEN 'High' ELSE 'Other' END FROM data;",  
+        "good_sql": "SELECT CASE WHEN revenue IS NULL THEN 'Missing' WHEN revenue > 1000 THEN 'High' ELSE 'Other' END FROM data;",
+        "detection_sql": "SELECT COUNT(*) FROM data WHERE revenue IS NULL;\nSELECT COUNT(*) FROM (above query) WHERE cat = 'Missing';"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "CASE WHEN in DuckDB vs other dialects",
+        "duckdb_behavior": "Full CASE WHEN support — order-sensitive, NULL-safe comparisons require explicit IS NULL checks. CASE returns first matching condition.",
+        "postgres_behavior": "Identical behavior — same SQL syntax and semantics.",
+        "bigquery_behavior": "CASE WHEN supported, but BigQuery’s type coercion may infer unexpected types — cast explicitly to avoid errors.",
+        "safe_alternative": "Always use IS NULL for null checks. Explicitly order rules from specific to general. In BigQuery, add CAST around CASE for safety."
+      },
+      {
+        "construct": "Multiple CASE WHEN in same SELECT",
+        "duckdb_behavior": "Each CASE is independent — no performance penalty for repeating similar logic. DuckDB may share computed expressions internally.",
+        "postgres_behavior": "Same — but complex CASE WHEN may be slower than CTE-based pre-computation.",
+        "bigquery_behavior": "Same, but BigQuery may bill for each CASE expression separately in complex queries.",
+        "safe_alternative": "If CASE WHEN logic is repeated across many columns, compute once in a CTE and reference: WITH classified AS (SELECT ..., CASE(...) AS segment), then reference segment elsewhere."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user says 'if X then Y, else Z' — clear business rules",
+        "defining segments based on thresholds (e.g., >1000 = 'High')",
+        "building prioritized rules where order matters (e.g., 'Champion' > 'Loyal' > 'At Risk')",
+        "encoding legacy system logic into analytics queries"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants equal-sized segments regardless of values",
+          "use_instead": "seg_width_bucket_ntile_guide",
+          "why": "NTILE/width_bucket enforce balance; CASE WHEN depends on data distribution and may create imbalanced buckets"
+        },
+        {
+          "condition": "user wants thresholds that adapt to recent data distribution",
+          "use_instead": "seg_dynamic_thresholds",
+          "why": "PERCENTILE-based thresholds rebase automatically; hard-coded CASE WHEN thresholds become stale"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "if revenue over 1000 then high",
+        "customer tiers based on spend",
+        "segment by rule",
+        "classify as X if Y",
+        "business rules"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Overlapping thresholds (e.g., revenue > 500 and revenue > 1000)",
+        "what_happens": "The first matching rule wins — revenue > 500 catches both $600 and $2000, so the second rule is never reached.",
+        "handling": "Order rules from most-specific to least-specific: revenue > 1000, revenue > 500, revenue > 0, else Other."
+      },
+      {
+        "scenario": "NULLs in key column",
+        "what_happens": "Comparison with NULL returns NULL, so rules fail. ELSE catches NULLs, but users may not realize data is missing.",
+        "handling": "Add explicit IS NULL checks at the top of CASE WHEN: CASE WHEN key IS NULL THEN 'Missing' WHEN key > 1000 THEN 'High' END."
+      },
+      {
+        "scenario": "Data drift changes distribution over time",
+        "what_happens": "Thresholds that worked last quarter no longer segment correctly — e.g., $1000 used to be top 10% but now is top 50%.",
+        "handling": "Recompute thresholds quarterly using PERCENTILE_CONT and hard-code those numbers, or switch to NTILE for dynamic segmentation."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) per row — CASE WHEN is evaluated row-by-row, but no additional scans",
+      "when_slow": "Very long CASE WHEN chains (>15 conditions) in large tables — CPU-bound but rarely the bottleneck.",
+      "optimization_hint": "Move frequent conditions to the top. If multiple CASE WHEN use the same input, compute once in a CTE. Use EXPLAIN to verify DuckDB doesn’t recompute expressions."
+    }
+  },
+  {
+    "id": "seg_dynamic_thresholds",
+    "title": "Dynamic Thresholds via Percentile",
+    "intent_tags": [
+      "adaptive thresholds",
+      "percentile-based thresholds",
+      "quantile thresholds",
+      "distribution-based cutoffs",
+      "dynamic segmentation",
+      "percentile segmentation",
+      "threshold tuning",
+      "adaptive buckets",
+      "data-driven rules",
+      "quantile buckets",
+      "self-calibrating",
+      "robust thresholds",
+      "outlier exclusion",
+      "data drift handling",
+      "dynamic classification"
+    ],
+    "sql_features": [
+      "percentile_cont",
+      "percentile_disc",
+      "within_group",
+      "cte",
+      "case_when",
+      "partition",
+      "order_by",
+      "sum",
+      "count",
+      "avg",
+      "window",
+      "join"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "classification",
+    "when_to_use": [
+      "user needs thresholds that adapt to data distribution (e.g., 'top 20%' of current data)",
+      "avoiding hardcoded thresholds that become outdated as data evolves",
+      "segmenting by quartiles/quintiles where exact values aren’t business-defined",
+      "detecting anomalies relative to recent distribution (e.g., 'above 95th percentile')",
+      "building reports where segments should rebase automatically each period"
+    ],
+    "when_not_to_use": [
+      "when business rules require fixed thresholds (e.g., regulatory: 'income > $100k' is always high)",
+      "when data has outliers that distort percentiles — use IQR or capped thresholds instead",
+      "when segments must be stable over time for comparison — dynamic thresholds break trend consistency",
+      "for time-series where rolling windows are needed — use moving percentile approximations",
+      "when percentile computation is too expensive for frequent re-computation (e.g., real-time)"
+    ],
+    "related_patterns": [
+      "seg_case_when_classification",
+      "seg_width_bucket_ntile_guide",
+      "stat_percentile_distribution",
+      "stat_iqr_outlier_detection",
+      "stat_anomaly_threshold_bands"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Dynamic thresholds compute percentile cutoffs from current data (e.g., 25th, 50th, 75th percentiles) and use them to assign segments. Instead of 'revenue > 1000', it says 'revenue in top 25% of this month'. This ensures segments reflect current data distribution.",
+      "mental_model": "Imagine measuring everyone’s height and cutting a histogram into quarters — today’s 'short' person might be 'tall' next year. Percentile-based thresholds rebaseline automatically; fixed thresholds don’t.",
+      "key_behavior": "PERCENTILE_CONT interpolates values (e.g., 50th percentile = median), while PERCENTILE_DISC picks an actual value. PERCENTILE_CONT gives smoother thresholds; PERCENTILE_DISC is discrete and safer for categorization."
+    },
+    "template": {
+      "minimal": "-- Compute 25th, 50th, 75th percentiles once\nWITH stats AS (\n  SELECT\n    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) AS p25,\n    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY revenue) AS p50,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS p75\n  FROM sales\n)\nSELECT\n  customer_id,\n  revenue,\n  CASE\n    WHEN revenue > p75 THEN 'top_quartile'\n    WHEN revenue > p50 THEN 'second_quartile'\n    WHEN revenue > p25 THEN 'third_quartile'\n    ELSE 'bottom_quartile'\n  END AS segment\nFROM sales, stats;",
+      "realistic": "-- Dynamic customer segments by revenue percentiles\nWITH monthly_revenue AS (\n  SELECT\n    customer_id,\n    SUM(order_total) AS revenue\n  FROM orders\n  WHERE order_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month'\n  GROUP BY 1\n),\npercentiles AS (\n  SELECT\n    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) AS p25,\n    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY revenue) AS p50,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS p75\n  FROM monthly_revenue\n),\nclassified AS (\n  SELECT\n    r.customer_id,\n    r.revenue,\n    CASE\n      WHEN r.revenue > p.p75 THEN 'top_quartile'\n      WHEN r.revenue > p.p50 THEN 'second_quartile'\n      WHEN r.revenue > p.p25 THEN 'third_quartile'\n      ELSE 'bottom_quartile'\n    END AS segment\n  FROM monthly_revenue r, percentiles p\n)\nSELECT\n  segment,\n  COUNT(*) AS customers,\n  ROUND(AVG(revenue), 2) AS avg_revenue,\n  ROUND(STDDEV(revenue), 2) AS stddev_revenue\nFROM classified\nGROUP BY 1\nORDER BY avg_revenue DESC;",
+      "composable": "-- Dynamic anomaly detection: flag values > 2σ above mean (combines seg_dynamic_thresholds + stat_z_score_detection)\n-- Composes: seg_dynamic_thresholds + stat_z_score_detection\nWITH revenue_stats AS (\n  SELECT\n    AVG(revenue) AS mean_rev,\n    STDDEV(revenue) AS stddev_rev\n  FROM monthly_revenue\n),\npercentiles AS (\n  SELECT\n    PERCENTILE_CONT(0.025) WITHIN GROUP (ORDER BY revenue) AS p2_5,\n    PERCENTILE_CONT(0.975) WITHIN GROUP (ORDER BY revenue) AS p97_5\n  FROM monthly_revenue\n),\nclassified AS (\n  SELECT\n    r.customer_id,\n    r.revenue,\n    s.mean_rev,\n    s.stddev_rev,\n    CASE\n      WHEN r.revenue > s.mean_rev + 2 * s.stddev_rev THEN 'above_upper_bound'\n      WHEN r.revenue < s.mean_rev - 2 * s.stddev_rev THEN 'below_lower_bound'\n      ELSE 'normal'\n    END AS anomaly_flag,\n    CASE\n      WHEN r.revenue > p.p97_5 THEN 'top_2_5_pct'\n      WHEN r.revenue < p.p2_5 THEN 'bottom_2_5_pct'\n      ELSE 'middle_95_pct'\n    END AS percentile_segment\n  FROM monthly_revenue r, revenue_stats s, percentiles p\n)\nSELECT * FROM classified\nWHERE anomaly_flag != 'normal' OR percentile_segment IN ('top_2_5_pct', 'bottom_2_5_pct')\nORDER BY revenue DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using PERCENTILE_CONT with non-numeric values",
+        "what_goes_wrong": "PERCENTILE_CONT requires numeric input. If passed strings or dates, it returns an error or coerces to NaN.",
+        "symptom": "Query fails with 'function percentile_cont(numeric, numeric) does not exist' or returns NULL.",
+        "bad_sql": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY name) FROM customers;",  
+        "good_sql": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST(revenue AS FLOAT)) FROM sales;",
+        "detection_sql": "SELECT typeof(revenue) FROM sales LIMIT 1;"
+      },
+      {
+        "mistake": "Not caching percentiles in a CTE before reuse",
+        "what_goes_wrong": "If PERCENTILE_CONT is called multiple times in the same query, it recomputes — potentially returning slightly different values due to floating-point variance, breaking consistency.",
+        "symptom": "Percentile-based conditions disagree with each other (e.g., revenue > p75 but < p25 in some rows).",
+        "bad_sql": "SELECT\n  CASE WHEN revenue > PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) THEN 'high' END,\n  CASE WHEN revenue < PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) THEN 'low' END\nFROM sales;",  
+        "good_sql": "WITH stats AS (\n  SELECT\n    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) AS p25,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS p75\n  FROM sales\n)\nSELECT\n  CASE WHEN revenue > p75 THEN 'high' END,\n  CASE WHEN revenue < p25 THEN 'low' END\nFROM sales, stats;",
+        "detection_sql": "-- Run the query twice — if percentiles differ, caching is missing\nSELECT PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) FROM sales;\nSELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) FROM sales;"
+      },
+      {
+        "mistake": "Assuming percentiles reflect fixed thresholds",
+        "what_goes_wrong": "Percentiles adapt to current data — a threshold that was 'top 5%' last month might be 'top 50%' this month. Users comparing trends see apparent 'growth' due to rebaselining, not real improvement.",
+        "symptom": "Segment counts or average metrics shift with no operational change — only data distribution changed.",
+        "bad_sql": "-- Compare top_quartile count this month vs last month using dynamic thresholds:\n-- WRONG: each month’s quartiles rebase, so 'top' means different absolute values\nWITH monthly AS (SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS p75 FROM orders WHERE DATE_TRUNC('month', order_date) = '2024-05-01'), ...",  
+        "good_sql": "To compare trends, use fixed thresholds: PERCENTILE_CONT(0.75) WITHIN GROUP over a fixed reference period (e.g., last 12 months).",
+        "detection_sql": "-- Compute month-over-month p75 change — if >10%, re-baselining may distort trends\nWITH m1 AS (SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS p75 FROM orders WHERE order_date >= '2024-04-01' AND order_date < '2024-05-01'),\nm2 AS (SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS p75 FROM orders WHERE order_date >= '2024-05-01' AND order_date < '2024-06-01')\nSELECT (m2.p75 - m1.p75) / NULLIF(m1.p75, 0) * 100 AS p75_change_pct FROM m1, m2;"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "WITHIN GROUP syntax",
+        "duckdb_behavior": "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY revenue) works natively in DuckDB.",
+        "postgres_behavior": "Supported since v14 — earlier versions use ARRAY_AGG + PERCENT_RANK. Postgres v13 and earlier lack WITHIN GROUP — use alternative.",
+        "bigquery_behavior": "Unsupported. BigQuery uses PERCENTILE_CONT(revenue) OVER (ORDER BY revenue ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) + QUALIFY rn = 1, or use APPROX_PERCENTILES.",
+        "safe_alternative": "In BigQuery, use PERCENTILE_CONT with OVER and filter to n/2 row. In older Postgres, compute percentiles with CTE + ROW_NUMBER."
+      },
+      {
+        "construct": "NULL handling in PERCENTILE_CONT",
+        "duckdb_behavior": "PERCENTILE_CONT ignores NULLs — they’re excluded from the sorted list. If all values are NULL, it returns NULL.",
+        "postgres_behavior": "Same — NULLs are skipped.",
+        "bigquery_behavior": "Same — PERCENTILE_CONT skips NULLs. APPROX_PERCENTILES does not support NULLs at all.",
+        "safe_alternative": "Filter NULLs explicitly before percentile calculation: WHERE revenue IS NOT NULL. Or use COALESCE(revenue, 0) if zero is appropriate."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user says 'segment by top 25%' instead of 'spend > $1000'",
+        "business wants segments that rebaseline automatically each period",
+        "data has outliers — fixed thresholds fail; percentiles are robust",
+        "comparing segments across time — each period’s thresholds adapt"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "business mandates fixed thresholds (e.g., 'income > $100k' is always high)",
+          "use_instead": "seg_case_when_classification",
+          "why": "Fixed thresholds ensure consistency across time; dynamic thresholds obscure absolute changes"
+        },
+        {
+          "condition": "user needs stable segment labels for trend analysis",
+          "use_instead": "seg_case_when_classification",
+          "why": "Dynamic thresholds change label meanings over time; fixed thresholds let 'Gold' always mean >$1000"
+        },
+        {
+          "condition": "data is sparse or non-normal — percentiles are misleading",
+          "use_instead": "stat_iqr_outlier_detection",
+          "why": "IQR (interquartile range) is more robust to outliers and sparse data than percentile-based thresholds"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "top quartile customers",
+        "percentile-based segment",
+        "re-baselined thresholds",
+        "top 10% of this month",
+        "adaptive thresholds"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Data has few distinct values (e.g., 5 unique revenues)",
+        "what_happens": "Percentiles collapse — p25, p50, p75 may all equal the same value. Segments become meaningless or empty.",
+        "handling": "Check distinct count before computing: IF (COUNT(DISTINCT revenue) < 10) THEN use WIDTH_BUCKET or CASE WHEN instead."
+      },
+      {
+        "scenario": "NULLs > 50% of data",
+        "what_happens": "PERCENTILE_CONT returns a value based on non-NULLs — but business may expect NULLs treated as a segment (e.g., 'missing' category).",
+        "handling": "Explicitly bucket NULLs first: CASE WHEN revenue IS NULL THEN 'Unknown' WHEN revenue > ... END."
+      },
+      {
+        "scenario": "Very skewed data (e.g., 1% of accounts have >90% of revenue)",
+        "what_happens": "Percentiles are pulled by the long tail — 'top quartile' includes most revenue-generating accounts, but median is low.",
+        "handling": "Use log-transformed revenue for percentile computation, or use IQR-based thresholds instead."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for sort + O(1) for percentile lookup",
+      "when_slow": "Large tables (>100M rows) with PERCENTILE_CONT — the sort dominates. Re-computing percentiles frequently in ad-hoc queries adds latency.",
+      "optimization_hint": "Pre-compute percentiles in a materialized view or CTE. For frequent queries, store monthly/quarterly percentiles in a lookup table. Use APPROX_PERCENTILES in DuckDB (optional) for speed vs accuracy tradeoff."
+    }
+  },
+  {
+    "id": "seg_multi_dimensional_scoring",
+    "title": "Multi-Dimensional Scoring",
+    "intent_tags": [
+      "composite score",
+      "weighted scoring",
+      "RFM scoring",
+      "multi-criteria ranking",
+      "business score",
+      "tier calculation",
+      "compound metric",
+      "normalized scoring",
+      "z-score scaling",
+      "min-max normalization",
+      "weighted average",
+      "segmentation by score",
+      "hybrid metrics",
+      "composite index",
+      "score aggregation"
+    ],
+    "sql_features": [
+      "case_when",
+      "sum",
+      "avg",
+      "stddev",
+      "min",
+      "max",
+      "coalesce",
+      "round",
+      "cast",
+      "cte",
+      "partition",
+      "order_by",
+      "window",
+      "join"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "classification",
+    "when_to_use": [
+      "user needs to combine multiple metrics into one score (e.g., RFM: recency, frequency, monetary)",
+      "segmenting entities by composite criteria (e.g., 'high value customers' = high recency + high spend)",
+      "ranking products by a hybrid score (growth + margin + novelty)",
+      "building dashboards where simple KPIs are insufficient — users want 'one number' summary",
+      "prioritizing leads, patients, or cases where multiple dimensions matter"
+    ],
+    "when_not_to_use": [
+      "when dimensions are on incomparable scales — normalization is required, or use non-linear scaling",
+      "when dimensions conflict (e.g., high growth but low profitability) — consider separate scores instead",
+      "for regulatory scoring where formula must be auditable — document weights and avoid black-box models",
+      "when weights are arbitrary — use business-driven weights or regression coefficients instead",
+      "for time-series scoring where trends matter more than snapshots — use rolling scores instead"
+    ],
+    "related_patterns": [
+      "seg_case_when_classification",
+      "seg_dynamic_thresholds",
+      "stat_anomaly_threshold_bands",
+      "stat_z_score_detection",
+      "stat_histogram_width"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Multi-dimensional scoring normalizes each metric (e.g., z-score or min-max), applies business weights, sums them into a composite score, and classifies entities into tiers (e.g., Platinum, Gold). It converts complex data into actionable segments.",
+      "mental_model": "Imagine a dashboard with three dials (recency, frequency, spend) — each dial has 0–100, you weight them (recency 40%, spend 30%, frequency 30%), add them up, and the final number determines the tier. It’s a weighted average of normalized dials.",
+      "key_behavior": "Weights must sum to 1 (or 100%) for interpretability. Normalization ensures no single dimension dominates. Outliers can distort z-scores — consider capped normalization or IQR scaling."
+    },
+    "template": {
+      "minimal": "-- RFM scoring with z-score normalization and equal weights\nWITH rfm AS (\n  SELECT\n    customer_id,\n    DATE_TRUNC('day', MAX(order_date)) AS last_order,\n    COUNT(DISTINCT order_id) AS frequency,\n    SUM(order_total) AS monetary\n  FROM orders\n  GROUP BY 1\n),\nrfm_scaled AS (\n  SELECT\n    r.customer_id,\n    -- Recency: days since last order (lower = better) → scale 0–100\n    ROUND(100 - (EXTRACT(EPOCH FROM (CURRENT_DATE - r.last_order)) / 86400 / NULLIF((SELECT MAX(EXTRACT(EPOCH FROM (CURRENT_DATE - last_order)))/86400 FROM rfm), 0) * 100), 0) AS r_score,\n    -- Frequency: normalize 0–100\n    ROUND(100 * r.frequency / NULLIF((SELECT MAX(frequency) FROM rfm), 0), 0) AS f_score,\n    -- Monetary: normalize 0–100\n    ROUND(100 * r.monetary / NULLIF((SELECT MAX(monetary) FROM rfm), 0), 0) AS m_score\n  FROM rfm r\n)\nSELECT\n  customer_id,\n  r_score,\n  f_score,\n  m_score,\n  ROUND(0.4 * r_score + 0.3 * f_score + 0.3 * m_score, 0) AS rfm_score,\n  CASE\n    WHEN (r_score + f_score + m_score) >= 240 THEN 'Platinum'\n    WHEN (r_score + f_score + m_score) >= 180 THEN 'Gold'\n    WHEN (r_score + f_score + m_score) >= 120 THEN 'Silver'\n    ELSE 'Bronze'\n  END AS tier\nFROM rfm_scaled;",
+      "realistic": "-- RFM scoring with z-score normalization (handles outliers better than min-max)\nWITH rfm AS (\n  SELECT\n    customer_id,\n    DATE_TRUNC('day', MAX(order_date)) AS last_order,\n    COUNT(DISTINCT order_id) AS frequency,\n    SUM(order_total) AS monetary\n  FROM orders\n  WHERE order_date >= CURRENT_DATE - INTERVAL '1 year'\n  GROUP BY 1\n),\nrfm_stats AS (\n  SELECT\n    AVG(EXTRACT(EPOCH FROM (CURRENT_DATE - last_order))/86400) AS avg_recency,\n    STDDEV(EXTRACT(EPOCH FROM (CURRENT_DATE - last_order))/86400) AS stddev_recency,\n    AVG(frequency) AS avg_frequency,\n    STDDEV(frequency) AS stddev_frequency,\n    AVG(monetary) AS avg_monetary,\n    STDDEV(monetary) AS stddev_monetary\n  FROM rfm\n),\nrfm_z AS (\n  SELECT\n    r.customer_id,\n    -- Recency: lower is better, so reverse z-score (higher = more recent)\n    ROUND(\n      50 + 20 * ((SELECT avg_recency FROM rfm_stats) - EXTRACT(EPOCH FROM (CURRENT_DATE - r.last_order))/86400)\n      / NULLIF((SELECT stddev_recency FROM rfm_stats), 0),\n    0) AS r_z,\n    -- Frequency: higher is better\n    ROUND(\n      50 + 20 * (r.frequency - (SELECT avg_frequency FROM rfm_stats))\n      / NULLIF((SELECT stddev_frequency FROM rfm_stats), 0),\n    0) AS f_z,\n    -- Monetary: higher is better\n    ROUND(\n      50 + 20 * (r.monetary - (SELECT avg_monetary FROM rfm_stats))\n      / NULLIF((SELECT stddev_monetary FROM rfm_stats), 0),\n    0) AS m_z\n  FROM rfm r\n),\nrfm_scored AS (\n  SELECT\n    customer_id,\n    r_z,\n    f_z,\n    m_z,\n    ROUND(0.4 * r_z + 0.3 * f_z + 0.3 * m_z, 0) AS rfm_score\n  FROM rfm_z\n)\nSELECT\n  customer_id,\n  rfm_score,\n  CASE\n    WHEN rfm_score >= 90 THEN 'Champion'\n    WHEN rfm_score >= 70 THEN 'Loyal'\n    WHEN rfm_score >= 50 THEN 'Potential'\n    WHEN rfm_score >= 30 THEN 'At Risk'\n    ELSE 'Lost'\n  END AS tier\nFROM rfm_scored\nORDER BY rfm_score DESC;",
+      "composable": "-- Campaign prioritization with multi-dimensional scoring (combines seg_multi_dimensional_scoring + dq_time_filter_before_window)\n-- Composes: seg_multi_dimensional_scoring + dq_time_filter_before_window\nWITH customer_metrics AS (\n  SELECT\n    customer_id,\n    SUM(CASE WHEN order_date >= CURRENT_DATE - INTERVAL '30 days' THEN order_total ELSE 0 END) AS recent_spend,\n    COUNT(DISTINCT CASE WHEN order_date >= CURRENT_DATE - INTERVAL '30 days' THEN order_id END) AS recent_orders,\n    SUM(CASE WHEN order_date < CURRENT_DATE - INTERVAL '90 days' THEN order_total ELSE 0 END) AS legacy_spend\n  FROM orders\n  WHERE order_date >= CURRENT_DATE - INTERVAL '1 year'\n  GROUP BY 1\n),\nstats AS (\n  SELECT\n    AVG(recent_spend) AS avg_recent_spend,\n    STDDEV(recent_spend) AS stddev_recent_spend,\n    AVG(recent_orders) AS avg_recent_orders,\n    STDDEV(recent_orders) AS stddev_recent_orders\n  FROM customer_metrics\n),\nwith_scores AS (\n  SELECT\n    cm.customer_id,\n    cm.recent_spend,\n    cm.recent_orders,\n    cm.legacy_spend,\n    -- Normalize and score (weights: recent_spend 60%, recent_orders 40%)\n    ROUND(\n      50 + 20 * (cm.recent_spend - s.avg_recent_spend)\n      / NULLIF(s.stddev_recent_spend, 0),\n    0) AS spend_score,\n    ROUND(\n      50 + 20 * (cm.recent_orders - s.avg_recent_orders)\n      / NULLIF(s.stddev_recent_orders, 0),\n    0) AS order_score,\n    ROUND(\n      0.6 * (50 + 20 * (cm.recent_spend - s.avg_recent_spend)\n        / NULLIF(s.stddev_recent_spend, 0))\n      + 0.4 * (50 + 20 * (cm.recent_orders - s.avg_recent_orders)\n        / NULLIF(s.stddev_recent_orders, 0)),\n    0) AS priority_score\n  FROM customer_metrics cm, stats s\n)\nSELECT\n  customer_id,\n  priority_score,\n  CASE\n    WHEN priority_score >= 90 THEN 'Tier 1 - High Priority'\n    WHEN priority_score >= 70 THEN 'Tier 2 - Medium Priority'\n    ELSE 'Tier 3 - Low Priority'\n  END AS campaign_tier\nFROM with_scores\nWHERE priority_score IS NOT NULL\nORDER BY priority_score DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Not normalizing before weighting — one dimension dominates",
+        "what_goes_wrong": "If revenue ranges from $1–$10,000 and frequency is 1–100, revenue’s weight swamps frequency even with equal weights. The score reflects mostly revenue, not a true composite.",
+        "symptom": "All high-value customers cluster at the top, low-value customers are indistinguishable; score lacks granularity.",
+        "bad_sql": "SELECT customer_id, 0.5 * revenue + 0.5 * frequency AS score FROM rfm;",  
+        "good_sql": "SELECT\n  customer_id,\n  0.5 * (revenue - min_rev) / NULLIF(max_rev - min_rev, 0) +\n  0.5 * (frequency - min_freq) / NULLIF(max_freq - min_freq, 0)\n  AS score\nFROM rfm, stats;",
+        "detection_sql": "SELECT\n  MAX(revenue), MIN(revenue),\n  MAX(frequency), MIN(frequency)\nFROM rfm;"
+      },
+      {
+        "mistake": "Weights don’t sum to 1 — scores are uninterpretable",
+        "what_goes_wrong": "Weights like 40+30+30=100 scale to 1.0, but 0.4+0.3+0.3=1.0 is correct. If weights sum to 2, the score is double what it should be.",
+        "symptom": "Scores appear inflated; thresholds become arbitrary.",
+        "bad_sql": "SELECT customer_id, 0.4 * r_z + 0.3 * f_z + 0.3 * m_z + 0.3 * z_score2 AS score FROM rfm_z;",  
+        "good_sql": "SELECT customer_id, 0.4 * r_z + 0.3 * f_z + 0.3 * m_z AS score FROM rfm_z;",
+        "detection_sql": "SELECT SUM(weight) FROM (VALUES (0.4, 'r'), (0.3, 'f'), (0.3, 'm')) AS weights(w, name); -- Should be 1.0"
+      },
+      {
+        "mistake": "Over-normalizing — z-scores beyond ±3 are capped",
+        "what_goes_wrong": "Z-scores > 3 or < -3 are rare (0.3% of data). If not handled, a few outliers dominate the score. Capping at ±3 is common but loses information.",
+        "symptom": "Top/bottom segments are driven by 1–2 extreme values; most customers cluster in middle tiers.",
+        "bad_sql": "SELECT 50 + 20 * (value - mean) / stddev FROM stats;",  
+        "good_sql": "SELECT\n  50 + 20 * GREATEST(-3, LEAST(3, (value - mean) / NULLIF(stddev, 0)))\n  FROM stats;",
+        "detection_sql": "SELECT\n  COUNT(*) FILTER (WHERE z > 3) AS z_gt_3,\n  COUNT(*) FILTER (WHERE z < -3) AS z_lt_neg3\nFROM (SELECT (value - mean) / stddev AS z FROM data) sub;"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "STDDEV in DuckDB vs other dialects",
+        "duckdb_behavior": "STDDEV_POP (population) and STDDEV_SAMP (sample) — use STDDEV_SAMP for samples. Both are supported.",
+        "postgres_behavior": "STDDEV is alias for STDDEV_SAMP. Population STDDEV uses STDDEV_POP.",
+        "bigquery_behavior": "STDDEV and VARIANCE are sample by default; use STDDEV_POP for population.",
+        "safe_alternative": "Explicitly use STDDEV_SAMP or STDDEV_POP to avoid ambiguity. In queries, comment which is used: -- STDDEV_SAMP = sample std dev"
+      },
+      {
+        "construct": "COALESCE and NULLIF nesting",
+        "duckdb_behavior": "Nested COALESCE(NULLIF(...), fallback) works cleanly — null-handling is robust.",
+        "postgres_behavior": "Same — PostgreSQL handles nested NULLIF/COALESCE well.",
+        "bigquery_behavior": "Same, but BigQuery’s strict type checking may require explicit CAST to FLOAT.",
+        "safe_alternative": "Always use COALESCE(NULLIF(...), fallback) for safe division or scaling to avoid NULL propagation. Test edge cases: data with 0 variance."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user needs to combine 2–5 metrics into one segment score",
+        "business has clear weightings (e.g., 'recency matters twice as much as spend')",
+        "normalization is required due to different scales",
+        "scoring must be transparent and auditable (unlike ML models)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "metrics conflict (e.g., high cost but low margin) — user wants trade-off analysis",
+          "use_instead": "stat_regr_slope",
+          "why": "Regression coefficients reveal true drivers; composite scores hide trade-offs"
+        },
+        {
+          "condition": "weights should adapt to data — e.g., 'most predictive metrics' change quarterly",
+          "use_instead": "seg_dynamic_thresholds",
+          "why": "Dynamic thresholds adjust cutoffs; composite scores assume fixed weights"
+        },
+        {
+          "condition": "only one metric matters — other dimensions are noise",
+          "use_instead": "seg_case_when_classification",
+          "why": "Composite scoring adds unnecessary complexity; one metric + thresholds is simpler"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "combine multiple metrics",
+        "weighted score",
+        "RFM score",
+        "tier calculation",
+        "composite metric"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Zero standard deviation in one dimension",
+        "what_happens": "z-score division by zero returns NULL — the whole score becomes NULL.",
+        "handling": "Add NULLIF(stddev, 0) or use IQR scaling: (value - median) / NULLIF(IQR, 0)."
+      },
+      {
+        "scenario": "Weights sum to >1 or <1 — user prefers raw score magnitude to matter",
+        "what_happens": "Score is scaled, making thresholds arbitrary. A '100' score could mean 50–200 depending on weights.",
+        "handling": "Normalize weights to sum to 1: SELECT weight / SUM(weight) OVER () FROM weights_table."
+      },
+      {
+        "scenario": "Outliers cause over-scoring — top 1% dominates tiers",
+        "what_happens": "Top tier is 1–2 customers; most customers appear 'average'. Segments lose differentiation.",
+        "handling": "Winsorize data: cap z-scores at ±3 or use IQR-based scaling instead of z-score."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) for stats computation + O(n log n) for sorting if ranking",
+      "when_slow": "Large datasets (>10M rows) with many dimensions — stats require full scans.",
+      "optimization_hint": "Pre-compute stats in a CTE or materialized view. For frequent scoring, store z-scores in a lookup table. Use APPROX_COUNT_DISTINCT and APPROX_PERCENTILES if exactness isn’t required."
+    }
+  },
+  {
+    "id": "seg_cohort_assignment",
+    "title": "Cohort Assignment by First Event",
+    "intent_tags": [
+      "acquisition cohort",
+      "first event cohort",
+      "cohort assignment",
+      "sign-up cohort",
+      "cohort analysis",
+      "user cohort",
+      "first touch cohort",
+      "assignment logic",
+      "cohort granularity",
+      "lookback window",
+      "cohort key",
+      "acquisition date",
+      "cohorts",
+      "acquisition cohort",
+      "first purchase"
+    ],
+    "sql_features": [
+      "row_number",
+      "partition",
+      "order_by",
+      "min",
+      "date_trunc",
+      "first_value",
+      "cte",
+      "join",
+      "case_when",
+      "window",
+      "filter"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "cohort",
+    "when_to_use": [
+      "user wants to assign users to cohorts based on first sign-up or first purchase date",
+      "building cohort retention tables (e.g., 'all users who signed up in week 1')",
+      "analyzing cohorts by acquisition channel or geography",
+      "segmenting by first touch (e.g., first marketing source) for channel attribution",
+      "calculating cohort lifetime metrics (e.g., revenue in 90 days after acquisition)"
+    ],
+    "when_not_to_use": [
+      "when cohorts should be defined by behavior, not time (e.g., 'users who watched video') — use event sequence detection instead",
+      "when user IDs are unreliable and first-touch attribution is noisy — use probabilistic attribution models",
+      "for real-time cohort assignment — use streaming tools instead of SQL batch processing",
+      "when cohort definitions change rapidly — static SQL cohorts require re-running queries",
+      "for anonymous users where first event lacks identity — use device fingerprinting or hashed IDs"
+    ],
+    "related_patterns": [
+      "ts_cohort_retention",
+      "ts_sessionization",
+      "ts_event_sequence",
+      "stat_percentile_distribution",
+      "seg_multi_dimensional_scoring"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Cohort assignment uses ROW_NUMBER to find the first event per user (e.g., first order date), assigns them to a cohort period (e.g., week, month), and links all future events to that cohort. It enables retention analysis: 'How many users signed up in Jan 2024 are still active in June?'",
+      "mental_model": "Imagine assigning every user to the month they first visited your site. All future activity is tagged with that cohort — like a 'birth certificate'. You then track how each cohort ages over time.",
+      "key_behavior": "The cohort key must be deterministic — use DATE_TRUNC(signup_date, 'month') or channel, not exact timestamp. ORDER BY must be stable (e.g., created_at DESC, then id DESC) to avoid flickering assignments."
+    },
+    "template": {
+      "minimal": "-- Assign users to monthly cohorts based on first order\nWITH first_orders AS (\n  SELECT\n    user_id,\n    MIN(order_date) AS first_order_date\n  FROM orders\n  GROUP BY 1\n),\ncohorted AS (\n  SELECT\n    user_id,\n    first_order_date,\n    DATE_TRUNC('month', first_order_date) AS cohort_month\n  FROM first_orders\n)\nSELECT * FROM cohorted;",
+      "realistic": "-- Assign customers to weekly cohorts based on first purchase, then calculate retention\nWITH first_orders AS (\n  SELECT\n    customer_id,\n    MIN(order_date) AS first_order_date\n  FROM orders\n  WHERE status = 'completed'\n  GROUP BY 1\n),\ncohorted AS (\n  SELECT\n    customer_id,\n    first_order_date,\n    DATE_TRUNC('week', first_order_date) AS cohort_week,\n    EXTRACT(YEAR FROM first_order_date) AS cohort_year,\n    EXTRACT(WEEK FROM first_order_date) AS cohort_week_num\n  FROM first_orders\n),\n-- Calculate active weeks per cohort\nuser_activity AS (\n  SELECT\n    o.customer_id,\n    DATE_TRUNC('week', o.order_date) AS activity_week\n  FROM orders o\n  JOIN cohorted c ON o.customer_id = c.customer_id\n  WHERE o.status = 'completed'\n  GROUP BY 1, 2\n),\n-- Join with cohort to get retention week\nwith_retention AS (\n  SELECT\n    c.cohort_week,\n    c.cohort_year,\n    c.cohort_week_num,\n    a.activity_week,\n    DATE_TRUNC('week', a.activity_week) - INTERVAL '1 day' + '1 day'::interval - c.cohort_week AS weeks_since_cohort\n  FROM cohorted c\n  LEFT JOIN user_activity a ON c.customer_id = a.customer_id\n  WHERE c.cohort_year = 2024 -- or dynamic\n)\nSELECT\n  cohort_week,\n  COUNT(DISTINCT c.customer_id) AS cohort_size,\n  COUNT(DISTINCT CASE WHEN wr.weeks_since_cohort = 0 THEN c.customer_id END) AS active_week_0,\n  COUNT(DISTINCT CASE WHEN wr.weeks_since_cohort = 1 THEN c.customer_id END) AS active_week_1,\n  COUNT(DISTINCT CASE WHEN wr.weeks_since_cohort = 2 THEN c.customer_id END) AS active_week_2\nFROM cohorted c\nLEFT JOIN with_retention wr ON c.customer_id = wr.customer_id\nGROUP BY 1\nORDER BY cohort_week;",
+      "composable": "-- Cohort assignment + retention matrix (combines seg_cohort_assignment + ts_cohort_retention)\n-- Composes: seg_cohort_assignment + ts_cohort_retention\nWITH first_orders AS (\n  SELECT\n    customer_id,\n    MIN(order_date) AS first_order_date\n  FROM orders\n  WHERE status = 'completed'\n  GROUP BY 1\n),\ncohorted AS (\n  SELECT\n    customer_id,\n    DATE_TRUNC('month', first_order_date) AS cohort_month\n  FROM first_orders\n),\nuser_activity AS (\n  SELECT\n    o.customer_id,\n    DATE_TRUNC('month', o.order_date) AS activity_month\n  FROM orders o\n  JOIN cohorted c ON o.customer_id = c.customer_id\n  WHERE o.status = 'completed'\n  GROUP BY 1, 2\n),\n-- Calculate retention per cohort\nretention AS (\n  SELECT\n    c.cohort_month,\n    c.customer_id,\n    MIN(a.activity_month) AS first_activity,\n    MAX(a.activity_month) AS last_activity,\n    COUNT(DISTINCT a.activity_month) AS active_months\n  FROM cohorted c\n  LEFT JOIN user_activity a ON c.customer_id = a.customer_id\n  GROUP BY 1, 2\n)\nSELECT\n  cohort_month,\n  COUNT(DISTINCT customer_id) AS cohort_size,\n  COUNT(DISTINCT CASE WHEN active_months >= 1 THEN customer_id END) AS month_1_retention,\n  COUNT(DISTINCT CASE WHEN active_months >= 3 THEN customer_id END) AS month_3_retention,\n  COUNT(DISTINCT CASE WHEN active_months >= 6 THEN customer_id END) AS month_6_retention\nFROM retention\nGROUP BY 1\nORDER BY cohort_month"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using MAX(order_date) instead of MIN for cohort assignment",
+        "what_goes_wrong": "Assigning users to their *last* order date places them in the cohort of their final activity, not acquisition. A user who signs up in January but orders in December is grouped with December’s cohort — not January’s.",
+        "symptom": "Cohort sizes shrink over time; retention curves look like churn when it’s actually assignment error.",
+        "bad_sql": "SELECT user_id, MAX(order_date) AS cohort_date FROM orders GROUP BY 1;",  
+        "good_sql": "SELECT user_id, MIN(order_date) AS cohort_date FROM orders GROUP BY 1;",
+        "detection_sql": "SELECT COUNT(*) FROM orders GROUP BY user_id HAVING COUNT(*) > 1;\nSELECT user_id, MIN(order_date), MAX(order_date) FROM orders GROUP BY 1 LIMIT 5;"
+      },
+      {
+        "mistake": "Not handling users with no orders (e.g., only page views)",
+        "what_goes_wrong": "Cohort assignment only includes users with orders, excluding sign-ups with no purchases — retention analysis is biased toward buyers.",
+        "symptom": "Cohort sizes drop significantly after filtering; 'acquisition' cohort is actually 'first purchase' cohort.",
+        "bad_sql": "SELECT user_id, MIN(order_date) AS cohort_date FROM orders GROUP BY 1;",  
+        "good_sql": "SELECT u.user_id, COALESCE(MIN(o.order_date), u.signup_date) AS cohort_date FROM users u LEFT JOIN orders o ON u.user_id = o.user_id GROUP BY 1;",
+        "detection_sql": "SELECT COUNT(*) FROM users WHERE signup_date IS NOT NULL;\nSELECT COUNT(DISTINCT user_id) FROM (above query);"
+      },
+      {
+        "mistake": "Using ORDER BY event_time without tiebreaker — flickering assignments",
+        "what_goes_wrong": "If a user has two events at the same timestamp, MIN(order_date) is stable, but ROW_NUMBER without tiebreaker picks arbitrary rows — assignments flicker between runs.",
+        "symptom": "Repeated queries return different cohort sizes or assignments for edge cases.",
+        "bad_sql": "SELECT user_id, order_date, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY order_date) AS rn FROM orders;",  
+        "good_sql": "SELECT user_id, order_date, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY order_date, id) AS rn FROM orders;",
+        "detection_sql": "SELECT user_id, COUNT(*) FROM orders WHERE order_date IN (SELECT MIN(order_date) FROM orders GROUP BY user_id) GROUP BY 1 HAVING COUNT(*) > 1;"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "DATE_TRUNC behavior in DuckDB",
+        "duckdb_behavior": "DATE_TRUNC('week', date) uses ISO week (Monday start). For fiscal weeks, custom logic needed.",
+        "postgres_behavior": "Same — ISO week by default. Postgres supports WEEK with ISO standard.",
+        "bigquery_behavior": "DATE_TRUNC(date, WEEK(MONDAY)) matches DuckDB. BigQuery also supports WEEK(SUNDAY) if needed.",
+        "safe_alternative": "Explicitly document the week convention. For non-ISO weeks, use CASE WHEN to adjust: DATE_TRUNC('month', date + INTERVAL 'N days')."
+      },
+      {
+        "construct": "NULL handling in COALESCE",
+        "duckdb_behavior": "COALESCE(MIN(order_date), signup_date) works — MIN returns NULL for no orders, COALESCE falls back to signup_date.",
+        "postgres_behavior": "Same — COALESCE is standard and robust.",
+        "bigquery_behavior": "Same, but BigQuery’s strict NULL handling may require COALESCE to be typed explicitly: COALESCE(CAST(MIN(order_date) AS DATE), signup_date).",
+        "safe_alternative": "Cast all fallback fields to DATE explicitly: COALESCE(CAST(MIN(order_date) AS DATE), CAST(signup_date AS DATE))."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user asks 'which cohort does this user belong to?'",
+        "building cohort retention tables (e.g., 'sign-up cohort' → 30-day retention)",
+        "segmenting by acquisition time (e.g., 'users who signed up in Q1 2024')",
+        "analyzing behavior *since* acquisition (e.g., revenue in first 90 days)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "cohort should be defined by behavior, not time (e.g., 'users who watched tutorial')",
+          "use_instead": "ts_event_sequence",
+          "why": "Event sequence detection identifies behavioral milestones; time-based cohorts ignore behavior"
+        },
+        {
+          "condition": "user wants dynamic cohort definitions (e.g., 'top 10% of users')",
+          "use_instead": "seg_dynamic_thresholds",
+          "why": "Dynamic thresholds rebaseline cohorts each period; static time cohorts don’t"
+        },
+        {
+          "condition": "cohort key is channel or device, not time",
+          "use_instead": "seg_case_when_classification",
+          "why": "Channel-based segmentation is better expressed as CASE WHEN on source fields"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "first order date",
+        "acquisition cohort",
+        "sign-up week",
+        "assign users to cohorts",
+        "by first event"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "User signs up but never completes an order",
+        "what_happens": "Cohort assignment falls back to signup_date — user is included but may be classified as 'no activity' if not tracked.",
+        "handling": "Include signup_date in the first event calculation: COALESCE(MIN(order_date), signup_date). Tag them as 'active' only if they have page views or other events."
+      },
+      {
+        "scenario": "Timezone differences — signup date in UTC vs local time",
+        "what_happens": "A user signing up at 11 PM UTC on Dec 31 might be in cohort Jan 1 if local timezone is UTC+2 — month assignment shifts.",
+        "handling": "Standardize to a single timezone before DATE_TRUNC: DATE_TRUNC('month', signup_date AT TIME ZONE 'America/New_York'). Document the timezone used."
+      },
+      {
+        "scenario": "First event is NULL or ambiguous (e.g., multiple channels)",
+        "what_happens": "First-touch attribution may pick a less significant channel, distorting cohort quality.",
+        "handling": "Define 'first event' business rules explicitly: e.g., 'first channel with >$0 spend' or 'first click after sign-up'. Filter first_events with CASE WHEN."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for MIN/ORDER BY + O(n) for join/retention",
+      "when_slow": "Large user base (>10M users) with many events — MIN per user is expensive. Retention joins are O(n^2) without filtering.",
+      "optimization hint": "Pre-filter to relevant date range before cohort assignment. Pre-aggregate events to first order per user in CTEs. Use APPROX_COUNT_DISTINCT for large cohorts. Index on user_id, order_date."
+    }
+  }
+]

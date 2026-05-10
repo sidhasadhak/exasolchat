@@ -1,215 +1,817 @@
 [
   {
-    "id": "wf_row_number",
-    "title": "ROW_NUMBER ranking",
+    "id": "wf_cumulative_sum_partition_reset",
+    "title": "Cumulative Sum with Partition Reset",
     "intent_tags": [
-      "ranking",
-      "dedup",
-      "top_n"
+      "running total", "cumulative sum", "累计和", "running balance",
+      "month to date", "year to date", "YTD", "MTD", "accumulated",
+      "total so far", "cumulative count", "running count", "cumulative revenue",
+      "running sum by group", "partition boundary reset"
     ],
-    "sql_features": [
-      "window"
-    ],
-    "difficulty": "intermediate",
+    "sql_features": ["window", "sum_over", "cte", "partition", "rows_between"],
+    "difficulty": "beginner",
     "pattern_type": "analytical",
-    "template": "ROW_NUMBER() OVER(PARTITION BY g ORDER BY m DESC)",
     "when_to_use": [
-      "top N per group",
-      "dedup"
+      "user wants a running total that resets at partition boundaries",
+      "computing cumulative revenue, units sold, or pageviews over time per category",
+      "building a dashboard showing cumulative adoption over time for each user segment",
+      "tracking cumulative usage within a billing period where periods are independent",
+      "calculating running count of events per session or per user",
+      "building sparkline-style cumulative trend indicators"
     ],
-    "anti_patterns": [
-      "missing partition"
+    "when_not_to_use": [
+      "user wants a grand total running across all partitions — use wf_percent_of_total without PARTITION BY instead",
+      "user wants a rolling window of fixed size (e.g., last 7 days) — use wf_sliding_window instead",
+      "user needs cumulative median or percentile — cumulative SUM only works for additive metrics",
+      "user wants to compare cumulative totals across groups — compute separately then join, or use a different aggregation"
     ],
     "related_patterns": [
-      "wf_rank",
-      "wf_dense_rank"
-    ]
+      "wf_percent_of_total", "wf_sliding_window", "wf_cumulative_sum",
+      "agg_conditional", "seg_case_when"
+    ],
+    "concept_explanation": {
+      "what_it_does": "SUM(column) OVER (PARTITION BY key ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) produces a running total that restarts from zero whenever the partition key changes — for example, a new product, user, or region triggers a fresh start.",
+      "mental_model": "Imagine a spreadsheet where each group (e.g., each product) has its own running total column that starts over at the first row of that product. As you move down rows, the value adds up within the group, but jumps back to the current row’s value when the group changes.",
+      "key_behavior": "The frame specification ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW is implicit in most databases when ORDER BY is present, but it's critical to understand that it *excludes* following rows — the cumulative sum only includes rows up to and including the current row, not future rows."
+    },
+    "template": {
+      "minimal": "SELECT category, date, revenue, SUM(revenue) OVER (PARTITION BY category ORDER BY date) AS running_total FROM daily_metrics",
+      "realistic": "-- Running total of revenue by product category, resetting each quarter\n-- Grain: one row per category per day. Missing days filled in via date spine (see ts_date_spine)\nWITH daily_revenue AS (\n  SELECT\n    p.category,\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  WHERE o.order_date >= DATE '2024-01-01'\n  GROUP BY 1, 2\n),\nspined AS (\n  -- Assume a date spine is joined here to fill gaps; omitted for brevity\n  SELECT * FROM daily_revenue\n)\nSELECT\n  category,\n  order_date,\n  revenue,\n  SUM(revenue) OVER (\n    PARTITION BY category\n    ORDER BY order_date\n    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n  ) AS running_revenue\nFROM spined\nORDER BY category, order_date",
+      "composable": "-- Cumulative revenue by category, then flag each day as above/below 75th percentile of category's running total\n-- Composes: wf_cumulative_sum + stat_percentile_distribution\nWITH daily_revenue AS (\n  SELECT\n    p.category,\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  GROUP BY 1, 2\n),\nwith_running AS (\n  SELECT\n    category,\n    order_date,\n    revenue,\n    SUM(revenue) OVER (PARTITION BY category ORDER BY order_date) AS running_revenue\n  FROM daily_revenue\n),\npercentiles AS (\n  SELECT\n    category,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY running_revenue) AS p75_running\n  FROM with_running\n  GROUP BY 1\n)\nSELECT\n  r.category,\n  r.order_date,\n  r.revenue,\n  r.running_revenue,\n  CASE\n    WHEN r.running_revenue > p.p75_running THEN 'above_75p'\n    ELSE 'at_or_below_75p'\n  END AS running_flag\nFROM with_running r\nJOIN percentiles p ON r.category = p.category\nORDER BY r.category, r.order_date"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Omitting ORDER BY in window definition",
+        "what_goes_wrong": "Without ORDER BY, the window frame has no defined ordering. The database may process rows in arbitrary physical order (e.g., insertion order or storage order). The running total may increase, decrease, or jump around erratically because 'current row' is undefined.",
+        "symptom": "The cumulative sum does not strictly increase within a partition — some rows show a decrease in running_total or no change, even though daily_revenue > 0.",
+        "bad_sql": "SELECT category, date, revenue, SUM(revenue) OVER (PARTITION BY category) AS running_total FROM daily_revenue",
+        "good_sql": "SELECT category, date, revenue, SUM(revenue) OVER (PARTITION BY category ORDER BY date) AS running_total FROM daily_revenue",
+        "detection_sql": "SELECT category, COUNT(*) AS violations FROM (\n  SELECT category, order_date, running_total,\n         LAG(running_total) OVER (PARTITION BY category ORDER BY order_date) AS prev_running\n  FROM bad_running_sum\n) WHERE running_total < prev_running GROUP BY category HAVING COUNT(*) > 0"
+      },
+      {
+        "mistake": "Using RANGE instead of ROWS (or default frame) with non-integer ORDER BY",
+        "what_goes_wrong": "If ORDER BY uses a non-integer column like DATE or TIMESTAMP, the default frame in some systems is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW. This treats *all rows with identical ORDER BY values* as peers and adds them *all* at once. With duplicate dates, running totals jump by the sum of *all* tied rows, not row-by-row.",
+        "symptom": "Rows with identical order_date show the same running_total value, but the next distinct date’s running_total suddenly jumps by the sum of *all* rows from the prior date.",
+        "bad_sql": "SELECT category, order_date, SUM(revenue) OVER (PARTITION BY category ORDER BY order_date) AS running_total FROM daily_revenue", 
+        "good_sql": "SELECT category, order_date, SUM(revenue) OVER (PARTITION BY category ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total FROM daily_revenue",
+        "detection_sql": "-- Find dates with multiple rows and check if their running totals match:\nSELECT category, order_date, COUNT(*) AS rows_per_day, MAX(running_total) - MIN(running_total) AS running_range\nFROM (\n  SELECT category, order_date, revenue,\n         SUM(revenue) OVER (PARTITION BY category ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total\n  FROM daily_revenue\n) t\nGROUP BY category, order_date\nHAVING COUNT(*) > 1 AND MAX(running_total) - MIN(running_total) > 0"
+      },
+      {
+        "mistake": "Accidentally including future rows in the frame (e.g., CURRENT ROW AND UNBOUNDED FOLLOWING)",
+        "what_goes_wrong": "A frame like ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING causes each row to sum from itself to the end of the partition — effectively producing *remaining* total instead of *accumulated* total. This reverses the semantics.",
+        "symptom": "The first row shows the highest cumulative total, and values decrease toward the last row, which shows only its own revenue.",
+        "bad_sql": "SELECT category, order_date, SUM(revenue) OVER (PARTITION BY category ORDER BY order_date ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS running_total FROM daily_revenue",
+        "good_sql": "SELECT category, order_date, SUM(revenue) OVER (PARTITION BY category ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total FROM daily_revenue",
+        "detection_sql": "SELECT category, order_date,\n       CASE WHEN running_total = (SELECT SUM(revenue) FROM daily_revenue dr2 WHERE dr2.category = dr.category) THEN 'starts_high' ELSE 'normal' END AS flag\nFROM daily_revenue dr\nORDER BY order_date DESC LIMIT 1"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "Default window frame when ORDER BY is present",
+        "duckdb_behavior": "DuckDB defaults to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW for ordered window functions unless explicitly overridden. This matches SQL standard expectations.",
+        "postgres_behavior": "Same default. However, older Postgres versions had bugs with empty frame handling — modern versions are reliable.",
+        "bigquery_behavior": "Same as DuckDB and Postgres.",
+        "safe_alternative": "Explicitly specify ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW in production code for clarity, even though it's the default."
+      },
+      {
+        "construct": "PARTITION BY with NULL values",
+        "duckdb_behavior": "DuckDB treats all NULLs in the PARTITION BY column as belonging to the same partition. This may be unintended — multiple groups with different semantics are merged.",
+        "postgres_behavior": "Same behavior. NULL is a valid partition key.",
+        "bigquery_behavior": "Same. NULLs group together.",
+        "safe_alternative": "Replace NULLs in the partition key with a sentinel (e.g., 'Unknown') or exclude rows with NULL in the partition column before applying the window function."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user explicitly wants a *running* total that resets per group",
+        "data has many rows per group and the user wants to see accumulation over time",
+        "user needs the total *up to each date* (not the total *for each date* — that's plain aggregation)",
+        "user's business question includes 'so far this', 'cumulative', or 'running'"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants one final total per group (not a series)",
+          "use_instead": "agg_grouping",
+          "why": "A simple GROUP BY with SUM is more efficient and clearer when no time-series step is needed"
+        },
+        {
+          "condition": "user wants the *same* total for every row (e.g., grand total), not a running cumulative",
+          "use_instead": "wf_percent_of_total",
+          "why": "SUM OVER (ORDER BY ...) with no PARTITION BY gives a grand total, but SUM OVER () gives the same total for all rows with less overhead"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "running total", "so far", "cumulative", "so far this week", "to date",
+        "accumulated", "up to now", "up to this row"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Partition has only one row",
+        "what_happens": "Running total equals the row’s own value (no accumulation needed). NULLs are handled correctly: SUM(3, NULL) = 3 if only one row, but SUM(NULL) = NULL.",
+        "handling": "If the single-row partition’s revenue is NULL, running_total = NULL. Use COALESCE(revenue, 0) in the outer query if zero is preferred."
+      },
+      {
+        "scenario": "Partition key contains NULLs",
+        "what_happens": "All rows with NULL partition key share one partition. The running total aggregates across what might be conceptually separate unknown groups.",
+        "handling": "Explicitly filter or replace NULLs: WHERE category IS NOT NULL or COALESCE(category, 'Unknown') AS category."
+      },
+      {
+        "scenario": "Duplicate ORDER BY values (e.g., same date appears twice)",
+        "what_happens": "If ties exist and no tiebreaker exists, the order of rows with the same date is arbitrary. Their cumulative sums may appear to 'jump' because the database decides which row counts first.",
+        "handling": "Add a deterministic tiebreaker: ORDER BY order_date, order_id or use ROW_NUMBER to enforce uniqueness."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) due to partitioned sort, O(n) for the scan. Sort cost dominates.",
+      "when_slow": "Very large partitions (>5M rows) or high-cardinality groups with many small partitions (thousands of groups, each with hundreds of rows), because sorting per group is expensive.",
+      "optimization_hint": "Pre-filter to the relevant date range in a CTE before applying the window function. If only the last 90 days are needed, filter before SUM OVER to reduce sort size significantly."
+    }
   },
   {
-    "id": "wf_rank",
-    "title": "RANK with gaps",
+    "id": "wf_sliding_window",
+    "title": "Sliding Window Aggregation",
     "intent_tags": [
-      "ranking"
+      "rolling average", "moving average", "moving window", "rolling sum",
+      "7-day average", "30-day rolling", "trailing window", "windowed aggregation",
+      "time-based window", "recent N days", "last 7 days", "trailing 30 days",
+      "warm-up period", "spike detection"
     ],
-    "sql_features": [
-      "window"
-    ],
+    "sql_features": ["window", "avg_over", "sum_over", "rows_between", "lag"],
     "difficulty": "intermediate",
     "pattern_type": "analytical",
-    "template": "RANK() OVER(PARTITION BY g ORDER BY m DESC)",
     "when_to_use": [
-      "leaderboards"
+      "user asks for a rolling average over a fixed time window (e.g., 7-day or 30-day)",
+      "detecting trends by smoothing noisy daily metrics (e.g., pageviews, revenue)",
+      "identifying spikes by comparing current values to recent average",
+      "building dashboards that show smoothed metrics (e.g., 'last 7-day avg' in BI tools)",
+      "preparing data for forecasting where recent history is the baseline"
     ],
-    "anti_patterns": [
-      "expect no gaps"
+    "when_not_to_use": [
+      "user wants a cumulative sum that *never* drops old values — use wf_cumulative_sum instead",
+      "user wants a running total across partitions *without* dropping old values — sliding windows *do* drop old values; cumulative windows do not",
+      "user wants a rolling median or percentile — sliding window AVG/SUM is easy; rolling percentiles require more complex pattern (e.g., windowed subquery or custom UDA)",
+      "user wants a rolling average based on *calendar time* (e.g., same day last week) rather than *row count* — use ts_yoy_comparison or self-join on DATE arithmetic instead"
     ],
     "related_patterns": [
-      "wf_dense_rank"
-    ]
+      "wf_cumulative_sum", "wf_lag_period_comparison", "stat_rolling_zscore",
+      "seg_case_when", "ts_yoy_comparison"
+    ],
+    "concept_explanation": {
+      "what_it_does": "AVG(column) OVER (ORDER BY date ROWS BETWEEN N PRECEDING AND CURRENT ROW) computes the average of the last N rows (plus current), regardless of how many days they span. It's a *row-based* sliding window, not *time-based* — it moves one row at a time.",
+      "mental_model": "Imagine a shopping cart that always holds the last 7 items you scanned. As you add a new item, the oldest one drops out. Sliding window aggregation is like that cart: it keeps only the last N rows, and recalculates the average each time you move down the sorted list.",
+      "key_behavior": "ROWS BETWEEN N PRECEDING AND CURRENT ROW counts *rows*, not *time*. If your data has gaps (missing dates), the window may span more than N calendar days. To enforce calendar-day windows, use RANGE or join to a date spine first."
+    },
+    "template": {
+      "minimal": "SELECT date, revenue, AVG(revenue) OVER (ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_7d_avg FROM daily_metrics",
+      "realistic": "-- Rolling 7-day average revenue per product category (row-based, not time-based)\n-- Handles gaps: if 3 days are missing, the window still covers 7 *rows*, not 7 days\nWITH daily_revenue AS (\n  SELECT\n    p.category,\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days'\n  GROUP BY 1, 2\n)\nSELECT\n  category,\n  order_date,\n  revenue,\n  ROUND(\n    AVG(revenue) OVER (\n      PARTITION BY category\n      ORDER BY order_date\n      ROWS BETWEEN 6 PRECEDING AND CURRENT ROW\n    ),\n  2) AS rolling_7d_avg\nFROM daily_revenue\nORDER BY category, order_date",
+      "composable": "-- Flag days where today's revenue is >50% higher than the 7-day rolling average (combines sliding window + CASE WHEN)\n-- Composes: wf_sliding_window + seg_case_when_classification\nWITH daily_revenue AS (\n  SELECT\n    p.category,\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY 1, 2\n),\nwith_rolling AS (\n  SELECT\n    category,\n    order_date,\n    revenue,\n    AVG(revenue) OVER (\n      PARTITION BY category\n      ORDER BY order_date\n      ROWS BETWEEN 6 PRECEDING AND CURRENT ROW\n    ) AS rolling_7d_avg,\n    -- Exclude current row from average for spike detection (rolling *excluding* today)\n    AVG(revenue) OVER (\n      PARTITION BY category\n      ORDER BY order_date\n      ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING\n    ) AS prev_7d_excl_today\n  FROM daily_revenue\n)\nSELECT\n  category,\n  order_date,\n  revenue,\n  rolling_7d_avg,\n  CASE\n    WHEN prev_7d_excl_today IS NULL OR prev_7d_excl_today = 0 THEN 'insufficient_history'\n    WHEN revenue > 1.5 * prev_7d_excl_today THEN 'spike'\n    WHEN revenue < 0.7 * prev_7d_excl_today THEN 'dip'\n    ELSE 'normal'\n  END AS anomaly_flag\nFROM with_rolling\nORDER BY category, order_date"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using AVG() with no PARTITION BY across heterogeneous groups",
+        "what_goes_wrong": "If multiple categories are mixed in one window (no PARTITION BY), the rolling average averages revenue across products, regions, and types. A high-revenue product’s row can inflate the rolling average for a low-revenue product just because they share the same temporal order.",
+        "symptom": "Rolling averages for niche products swing wildly when a bestseller’s revenue appears in the window, even though the niche product itself didn’t change.",
+        "bad_sql": "SELECT category, order_date, revenue,\n       AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_avg\nFROM daily_revenue",
+        "good_sql": "SELECT category, order_date, revenue,\n       AVG(revenue) OVER (PARTITION BY category ORDER BY order order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_avg\nFROM daily_revenue",
+        "detection_sql": "SELECT category, AVG(rolling_avg) AS avg_rolling, STDDEV(rolling_avg) AS sd_rolling\nFROM (\n  SELECT category, order_date, revenue,\n         AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_avg\n  FROM daily_revenue\n) t\nGROUP BY category\nORDER BY sd_rolling DESC LIMIT 1"
+      },
+      {
+        "mistake": "Confusing ROWS vs RANGE for time-based windows",
+        "what_goes_wrong": "ROWS BETWEEN 6 PRECEDING AND CURRENT ROW uses *row count*, not *calendar days*. If data is missing for some days, the window may cover 10 calendar days. RANGE uses actual time values, but requires the ORDER BY column to be numeric, integer, or date with specific dialect support — in DuckDB, RANGE only works with numeric/integer ORDER BY columns, not DATE.",
+        "symptom": "Users notice the '7-day' average sometimes spans 10+ calendar days during weekends or holidays when data is sparse.",
+        "bad_sql": "SELECT date, revenue,\n       AVG(revenue) OVER (ORDER BY order_date RANGE BETWEEN 6 PRECEDING AND CURRENT ROW) AS time_window_avg\nFROM daily_revenue",
+        "good_sql": "-- Option 1: Use ROWS + assume row-based is acceptable\n-- Option 2: Join to date spine, then use ROWS\nSELECT d.order_date, d.revenue,\n       AVG(d.revenue) OVER (ORDER BY d.order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_avg\nFROM (\n  SELECT date_series AS order_date,\n         COALESCE(r.revenue, 0) AS revenue\n  FROM generate_series(DATE '2024-01-01', CURRENT_DATE, INTERVAL '1 day') AS gs(date_series)\n  LEFT JOIN daily_revenue d ON gs.date_series = d.order_date\n) d",
+        "detection_sql": "-- Check window width in days for each row:\nWITH windowed AS (\n  SELECT order_date, revenue,\n         LAG(order_date, 6) OVER (ORDER BY order_date) AS window_start\n  FROM daily_revenue\n),\nspan AS (\n  SELECT order_date, revenue,\n         DATEDIFF('day', window_start, order_date) AS span_days\n  FROM windowed\n)\nSELECT span_days, COUNT(*) AS row_count\nFROM span\nGROUP BY span_days\nORDER BY span_days DESC"
+      },
+      {
+        "mistake": "Ignoring warm-up period and flagging early rows as anomalies",
+        "what_goes_wrong": "In the first N rows (e.g., first 7 rows), the sliding window has fewer than N rows. AVG is still computed correctly, but the average is unstable and based on very little data. Users may mistake early volatility for a true anomaly.",
+        "symptom": "The first few rows of the rolling average show extreme values, or anomaly flags appear only in the first week.",
+        "bad_sql": "SELECT order_date, revenue,\n       AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_avg\nFROM daily_revenue\nWHERE revenue > 2 * rolling_avg",
+        "good_sql": "WITH base AS (\n  SELECT order_date, revenue,       AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_avg\n  FROM daily_revenue\n)\nSELECT order_date, revenue, rolling_avg\nFROM base\nWHERE rolling_avg IS NOT NULL\n  AND revenue > 2 * rolling_avg",
+        "detection_sql": "-- Count rows where the window has < N rows (warm-up rows):\nWITH windowed AS (\n  SELECT order_date, revenue,\n         ROW_NUMBER() OVER (ORDER BY order_date) AS row_num\n  FROM daily_revenue\n)\nSELECT COUNT(*) AS warm_up_rows\nFROM windowed\nWHERE row_num <= 6 -- for N=7"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "RANGE frame with DATE ORDER BY",
+        "duckdb_behavior": "DuckDB does *not* support RANGE with DATE ORDER BY — it only works with numeric/integer types. Using RANGE with DATE causes a syntax error.",
+        "postgres_behavior": "Same: RANGE is only supported for numeric, integer, or interval types. DATE does not work.",
+        "bigquery_behavior": "Same limitation. Use DATE_ADD or explicit interval arithmetic to convert to integer days.",
+        "safe_alternative": "Prefer ROWS for row-based windows. If time-based is essential, convert DATE to integer days (e.g., DATEDIFF from epoch) and use RANGE, or generate a dense date spine first."
+      },
+      {
+        "construct": "NULL values in the aggregated column",
+        "duckdb_behavior": "AVG() ignores NULL values in the denominator — AVG(10, NULL, 20) = 15. However, if *all* rows in the window are NULL, AVG returns NULL.",
+        "postgres_behavior": "Same behavior.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "COALESCE(revenue, 0) if zero is semantically correct, or handle NULLs explicitly in CASE WHEN to distinguish 'no data' from 'zero activity'."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants a *fixed number of rows* behind the current row (not fixed time)",
+        "data is dense (few gaps) and row-based windowing is acceptable",
+        "user's question uses 'last N rows', 'rolling', or 'trailing X rows'",
+        "speed matters — row-based windows avoid date spines and are faster"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to compare to the same calendar day last week (e.g., today vs. 7 days ago)",
+          "use_instead": "ts_yoy_comparison",
+          "why": "Time-based alignment requires date arithmetic, not row count"
+        },
+        {
+          "condition": "user requires exactly N *calendar days* (e.g., 7 days = 7 days, not 7 rows)",
+          "use_instead": "ts_date_spine + rolling join",
+          "why": "Date spine ensures every day is present, so row count matches calendar days"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "rolling", "trailing", "last 7 rows", "7-day moving average",
+        "sliding window", "recent", "N-day average"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "First N-1 rows in partition",
+        "what_happens": "The window contains fewer than N rows. AVG, SUM, etc. are computed correctly over available rows (e.g., 3 rows → avg over 3). No error — but the average is noisy.",
+        "handling": "Filter out warm-up rows: WHERE ROW_NUMBER() OVER (ORDER BY ...) > N OR use a CTE to compute row_num and filter."
+      },
+      {
+        "scenario": "Partition has no rows",
+        "what_happens": "The window function returns no rows — the query produces zero output for that partition.",
+        "handling": "No adjustment needed — empty partitions produce empty results. But if using in joins, a LEFT JOIN may be needed to preserve empty partitions."
+      },
+      {
+        "scenario": "All rows in partition have NULL values",
+        "what_happens": "AVG returns NULL for all rows (since AVG ignores NULLs, but all values are NULL → result is NULL). SUM returns NULL too.",
+        "handling": "COALESCE(revenue, 0) if zero is acceptable, or use COUNT() over non-NULL values to detect zero-activity partitions."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for the sort (per partition), O(n) for the sliding scan. Dominated by partitioned sort.",
+      "when_slow": "Very large partitions (>10M rows) or high-partition-count schemas (e.g., 100k products, each with 100 rows). Sorts per partition are costly.",
+      "optimization_hint": "If you only need the last 30 days, filter to 30 + N rows *before* the window to reduce sort size. Also, materialize the pre-aggregated CTE if reused across multiple window functions."
+    }
   },
   {
-    "id": "wf_dense_rank",
-    "title": "Dense ranking",
+    "id": "wf_lag_period_comparison",
+    "title": "LAG/LEAD for Period-over-Period Comparison",
     "intent_tags": [
-      "ranking"
+      "previous value", "prior row", "last month comparison", "month over month",
+      "compare to previous period", "delta from last", "lag", "lead",
+      "change from prior", "previous row value", "period over period",
+      "what was last month's value", "week over week", "wow", "mom",
+      "growth rate", "percent change from previous", "yoy at row level"
     ],
-    "sql_features": [
-      "window"
-    ],
+    "sql_features": ["lag", "lead", "window", "cte", "nullif", "coalesce"],
     "difficulty": "intermediate",
     "pattern_type": "analytical",
-    "template": "DENSE_RANK() OVER(PARTITION BY g ORDER BY m DESC)",
     "when_to_use": [
-      "compact ranking"
+      "user asks for month-over-month or week-over-week comparison at the row level",
+      "computing growth rate or delta between consecutive time periods",
+      "detecting trend direction (increasing, decreasing, flat) per group",
+      "comparing each row to its predecessor within a partition (e.g., per product, per region)",
+      "flagging periods where a metric changed by more than X%",
+      "building sparkline-style trend indicators (up/down/flat)"
     ],
-    "anti_patterns": [
-      "expect gaps"
+    "when_not_to_use": [
+      "comparing to a fixed baseline (e.g., first month ever, Jan 2023 specifically) — use wf_first_value instead, since LAG only sees the immediately adjacent row",
+      "comparing to the same month in the prior year (YoY) — LAG(x, 12) works for monthly data but is fragile if months are missing; use a self-join on year-ago date instead (ts_yoy_comparison)",
+      "computing a running/cumulative total — LAG gives the previous single value, not a cumulative sum; use wf_cumulative_sum instead",
+      "user wants the most recent value per group without ordering context — use wf_last_value or a ROW_NUMBER dedupe pattern"
     ],
     "related_patterns": [
-      "wf_rank"
-    ]
+      "wf_first_value", "wf_cumulative_sum", "ts_yoy_comparison",
+      "wf_row_number_dedup", "ts_date_spine"
+    ],
+    "concept_explanation": {
+      "what_it_does": "LAG(column, offset, default) returns the value from a row that is 'offset' rows before the current row in the window's ORDER BY sequence. LEAD does the same but looks forward. Both are row-navigation functions — they let you reference another row's value without a self-join.",
+      "mental_model": "Imagine your result set printed on paper, sorted by date within each group. LAG(revenue, 1) means: look one line up and read that line's revenue value. If you're on the first line of a group, there is no line above — LAG returns NULL (or the default you specified).",
+      "key_behavior": "LAG is ORDER BY-dependent. Without an explicit ORDER BY in the OVER clause, the 'previous' row is undefined — the database may return any row's value, and results will be non-deterministic. Always specify ORDER BY, and add a tiebreaker column if the ordering column has duplicate values."
+    },
+    "template": {
+      "minimal": "SELECT date, revenue, LAG(revenue) OVER (ORDER BY date) AS prev_revenue FROM monthly_metrics",
+      "realistic": "-- Month-over-month revenue with growth rate per product category\nWITH monthly_revenue AS (\n  -- Grain: one row per month × category. Excludes cancelled orders.\n  SELECT\n    DATE_TRUNC('month', o.order_date) AS month,\n    p.category,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  WHERE o.status NOT IN ('cancelled', 'test')\n  GROUP BY 1, 2\n)\nSELECT\n  month,\n  category,\n  revenue,\n  LAG(revenue) OVER (PARTITION BY category ORDER BY month) AS prev_month_revenue,\n  revenue - LAG(revenue) OVER (PARTITION BY category ORDER BY month) AS revenue_delta,\n  ROUND(\n    (revenue - LAG(revenue) OVER (PARTITION BY category ORDER BY month))\n    / NULLIF(LAG(revenue) OVER (PARTITION BY category ORDER BY month), 0) * 100,\n  2) AS mom_growth_pct\nFROM monthly_revenue\nORDER BY category, month",
+      "composable": "-- Anomaly detection: flag months where MoM growth exceeds ±30% (combines LAG + CASE WHEN + CTE pipeline)\n-- Composes: wf_lag_period_comparison + seg_case_when_classification\nWITH monthly_revenue AS (\n  SELECT\n    DATE_TRUNC('month', o.order_date) AS month,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  WHERE o.status NOT IN ('cancelled', 'test')\n  GROUP BY 1\n),\nwith_growth AS (\n  SELECT\n    month,\n    revenue,\n    LAG(revenue) OVER (ORDER BY month) AS prev_revenue,\n    ROUND(\n      (revenue - LAG(revenue) OVER (ORDER BY month))\n      / NULLIF(LAG(revenue) OVER (ORDER BY month), 0) * 100,\n    2) AS mom_growth_pct\n  FROM monthly_revenue\n)\nSELECT\n  month,\n  revenue,\n  prev_revenue,\n  mom_growth_pct,\n  CASE\n    WHEN prev_revenue IS NULL THEN 'first_period'\n    WHEN mom_growth_pct > 30 THEN 'spike'\n    WHEN mom_growth_pct < -30 THEN 'drop'\n    ELSE 'normal'\n  END AS anomaly_flag\nFROM with_growth\nORDER BY month"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Missing ORDER BY in LAG window",
+        "what_goes_wrong": "Without ORDER BY, the database picks an arbitrary row as 'previous'. On DuckDB the default is often physical insertion order, which may look correct during testing but breaks after table compaction, VACUUM, or when reading from Parquet files with different row group orderings. Results become non-deterministic.",
+        "symptom": "MoM growth percentages fluctuate wildly or change between query executions on the same data. Same query on same data returns different results.",
+        "bad_sql": "SELECT month, revenue, LAG(revenue) OVER () AS prev_revenue FROM monthly_metrics",
+        "good_sql": "SELECT month, revenue, LAG(revenue) OVER (ORDER BY month) AS prev_revenue FROM monthly_metrics",
+        "detection_sql": "-- Run the query twice and compare results. If they differ, ORDER BY is missing or non-deterministic.\n-- Or check for duplicate ordering values:\nSELECT month, COUNT(*) FROM monthly_metrics GROUP BY month HAVING COUNT(*) > 1"
+      },
+      {
+        "mistake": "Missing PARTITION BY when comparing within groups",
+        "what_goes_wrong": "Without PARTITION BY, LAG looks at the previous row across the entire result set. If your data has multiple categories sorted by date, the last row of category A bleeds into the first row of category B. The first month of category B gets compared to the last month of category A — a cross-group comparison that is logically meaningless.",
+        "symptom": "The first row of each group shows a huge positive or negative delta that doesn't match the group's own history. Revenue growth at group boundaries looks like +500% or -80%.",
+        "bad_sql": "SELECT month, category, revenue, LAG(revenue) OVER (ORDER BY month) AS prev_revenue FROM monthly_revenue",
+        "good_sql": "SELECT month, category, revenue, LAG(revenue) OVER (PARTITION BY category ORDER BY month) AS prev_revenue FROM monthly_revenue",
+        "detection_sql": "-- Check if the first row of each partition has a non-NULL LAG value (it should be NULL):\nWITH ranked AS (SELECT category, month, LAG(revenue) OVER (PARTITION BY category ORDER BY month) AS prev_rev, ROW_NUMBER() OVER (PARTITION BY category ORDER BY month) AS rn FROM monthly_revenue) SELECT * FROM ranked WHERE rn = 1 AND prev_rev IS NOT NULL"
+      },
+      {
+        "mistake": "Division by LAG result without NULLIF",
+        "what_goes_wrong": "The first row in each partition has LAG = NULL. Computing (revenue - NULL) / NULL yields NULL for the growth rate, which is correct but often confusing. However, if the previous period's revenue was exactly 0.00, dividing by it produces a division-by-zero error or Infinity, which crashes downstream calculations or BI tools.",
+        "symptom": "Query returns an error on execution, or the growth rate column contains Infinity or NaN values for periods following a zero-revenue month.",
+        "bad_sql": "SELECT month, (revenue - LAG(revenue) OVER (ORDER BY month)) / LAG(revenue) OVER (ORDER BY month) * 100 AS growth_pct FROM monthly_metrics",
+        "good_sql": "SELECT month, ROUND((revenue - LAG(revenue) OVER (ORDER BY month)) / NULLIF(LAG(revenue) OVER (ORDER BY month), 0) * 100, 2) AS growth_pct FROM monthly_metrics",
+        "detection_sql": "-- Check for zero-revenue periods that would cause division by zero:\nSELECT month, revenue FROM monthly_metrics WHERE revenue = 0 OR revenue IS NULL ORDER BY month"
+      },
+      {
+        "mistake": "Using LAG(x, 12) for YoY on monthly data with gaps",
+        "what_goes_wrong": "LAG(x, 12) looks exactly 12 rows back in the partition, not 12 months back. If any month is missing from the data (e.g., a month with zero activity was omitted), row 12 back is actually 13+ months ago. The comparison is silently misaligned.",
+        "symptom": "YoY growth percentages look plausible but are comparing to the wrong month. March 2024 is compared to January 2023 instead of March 2023.",
+        "bad_sql": "SELECT month, revenue, LAG(revenue, 12) OVER (ORDER BY month) AS yoy_revenue FROM monthly_metrics",
+        "good_sql": "-- Use a self-join on date arithmetic instead:\nWITH monthly AS (SELECT DATE_TRUNC('month', order_date) AS month, SUM(order_total) AS revenue FROM orders GROUP BY 1)\nSELECT m.month, m.revenue, y.revenue AS yoy_revenue, ROUND((m.revenue - y.revenue) / NULLIF(y.revenue, 0) * 100, 2) AS yoy_growth_pct FROM monthly m LEFT JOIN monthly y ON m.month = y.month + INTERVAL '12 months'",
+        "detection_sql": "-- Verify no months are missing (gap detection):\nWITH months AS (SELECT DATE_TRUNC('month', order_date) AS month FROM orders GROUP BY 1), spine AS (SELECT UNNEST(generate_series(MIN(month), MAX(month), INTERVAL '1 month')) AS month FROM months) SELECT s.month AS missing_month FROM spine s LEFT JOIN months m ON s.month = m.month WHERE m.month IS NULL"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "LAG with default value parameter",
+        "duckdb_behavior": "LAG(col, 1, 0) works — returns 0 when no previous row exists. Third parameter is the default.",
+        "postgres_behavior": "Same syntax and behavior as DuckDB.",
+        "bigquery_behavior": "Same syntax. But BigQuery LAG requires OVER clause to have ORDER BY; omitting it is a compile-time error (unlike DuckDB where it silently returns arbitrary results).",
+        "safe_alternative": "Always use all three parameters: LAG(col, 1, 0) OVER (PARTITION BY ... ORDER BY ...). This is portable across all three."
+      },
+      {
+        "construct": "QUALIFY for filtering on window function results",
+        "duckdb_behavior": "Supported natively. QUALIFY mom_growth_pct > 30 filters after window evaluation without needing a CTE wrapper.",
+        "postgres_behavior": "Not supported. Use a CTE: WITH t AS (SELECT ..., LAG(...) ...) SELECT * FROM t WHERE growth_pct > 30.",
+        "bigquery_behavior": "Supported natively, same as DuckDB.",
+        "safe_alternative": "If targeting DuckDB specifically, use QUALIFY for cleaner syntax. If portability matters, use CTE + outer WHERE."
+      },
+      {
+        "construct": "Multiple LAG calls in same SELECT",
+        "duckdb_behavior": "Each LAG() call with the same OVER clause is computed in a single window pass — no performance penalty for multiple LAG/LEAD calls sharing the same window definition.",
+        "postgres_behavior": "Same optimization — shared WINDOW clause (WINDOW w AS (...)) is recommended for readability: LAG(x) OVER w, LAG(y) OVER w.",
+        "bigquery_behavior": "Same behavior. Use named windows for readability.",
+        "safe_alternative": "Use a named WINDOW clause when you have ≥3 window function calls sharing the same OVER: WINDOW w AS (PARTITION BY category ORDER BY month), then reference LAG(revenue) OVER w, LAG(orders) OVER w."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to compare each row to its immediately preceding row (in sorted order within a group)",
+        "computing period-over-period growth (MoM, WoW, QoQ) at row level",
+        "detecting changes or deltas between consecutive periods",
+        "building trend direction indicators (up/down/flat)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to compare every row to the FIRST row in the group (not the previous row)",
+          "use_instead": "wf_first_value_baseline",
+          "why": "FIRST_VALUE returns the same baseline for every row in the partition, while LAG shifts with each row"
+        },
+        {
+          "condition": "user wants a running cumulative total, not a row-to-row delta",
+          "use_instead": "wf_cumulative_sum",
+          "why": "cumulative SUM accumulates all preceding values; LAG only shows the single previous value"
+        },
+        {
+          "condition": "user wants same-month comparison across years (YoY) and data may have gaps",
+          "use_instead": "ts_yoy_comparison",
+          "why": "LAG(x, 12) assumes no missing months — a self-join on date arithmetic is gap-safe"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "month over month", "week over week", "compared to last period",
+        "previous month", "prior week", "change from last", "delta",
+        "growth rate", "percent change", "trend direction", "vs prior"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "First row in partition has no previous row",
+        "what_happens": "LAG returns NULL. Any arithmetic with NULL (e.g., revenue - NULL) produces NULL. The growth rate for the first period is NULL, not zero.",
+        "handling": "Use COALESCE(LAG(revenue) OVER (...), 0) if zero is the correct default, or leave as NULL and handle in the presentation layer. Document the convention."
+      },
+      {
+        "scenario": "Duplicate values in ORDER BY column (e.g., two rows with the same month)",
+        "what_happens": "The ordering between tied rows is non-deterministic. LAG might return either tied row's value. Results change between executions.",
+        "handling": "Add a tiebreaker column: ORDER BY month, category (or a surrogate key). Ensure the ordering is fully deterministic."
+      },
+      {
+        "scenario": "Partition with only one row",
+        "what_happens": "LAG returns NULL (no previous row). If the query filters WHERE growth_pct IS NOT NULL, this row is silently dropped — it disappears from the output without warning.",
+        "handling": "Use COALESCE or explicitly handle the single-row case: CASE WHEN LAG(revenue) OVER (...) IS NULL THEN 'no_prior_period' END."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for the window sort, O(n) for the LAG scan. Dominated by the sort cost.",
+      "when_slow": "Large partitions (>10M rows per partition) with complex ORDER BY (multiple columns or expressions). Also slow when the window function references a Parquet file with many row groups that need cross-group sorting.",
+      "optimization_hint": "Pre-filter to the relevant date range in a CTE before applying LAG. If you only need last 12 months of MoM growth, filter to 13 months (to get the LAG baseline for month 1) rather than scanning the full history."
+    }
   },
   {
-    "id": "wf_ntile",
-    "title": "NTILE bucketing",
+    "id": "wf_first_last_frame",
+    "title": "FIRST_VALUE / LAST_VALUE with Correct Frame",
     "intent_tags": [
-      "quantiles",
-      "segmentation"
+      "first value", "last value", "first row", "latest row", "latest record",
+      "first order", "first sale", "last click", "baseline", "reference point",
+      "most recent", "end of period", "start of period", "per group first/last",
+      "latest value per category", "initial value"
     ],
-    "sql_features": [
-      "window"
-    ],
-    "difficulty": "advanced",
-    "pattern_type": "analytical",
-    "template": "NTILE(4) OVER(ORDER BY m)",
-    "when_to_use": [
-      "quartiles"
-    ],
-    "anti_patterns": [
-      "small dataset"
-    ],
-    "related_patterns": []
-  },
-  {
-    "id": "wf_running_sum",
-    "title": "Running total",
-    "intent_tags": [
-      "cumulative",
-      "timeseries"
-    ],
-    "sql_features": [
-      "window"
-    ],
+    "sql_features": ["first_value", "last_value", "window", "cte", "rows_between"],
     "difficulty": "intermediate",
     "pattern_type": "analytical",
-    "template": "SUM(x) OVER(ORDER BY t ROWS UNBOUNDED PRECEDING)",
     "when_to_use": [
-      "cumulative metrics"
+      "user wants the first or last value within a partition, not just the value of the current row",
+      "computing growth from first period (e.g., 'revenue as % of first month')",
+      "getting the most recent observation per group (e.g., latest product price)",
+      "building KPIs that compare current to baseline (e.g., customer lifetime value as % of first-order value)",
+      "creating a 'start of period' or 'end of period' reference in dashboards"
     ],
-    "anti_patterns": [
-      "missing order"
-    ],
-    "related_patterns": []
-  },
-  {
-    "id": "wf_running_avg",
-    "title": "Running average",
-    "intent_tags": [
-      "moving_avg"
-    ],
-    "sql_features": [
-      "window"
-    ],
-    "difficulty": "intermediate",
-    "pattern_type": "analytical",
-    "template": "AVG(x) OVER(ORDER BY t ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)",
-    "when_to_use": [
-      "smoothing"
-    ],
-    "anti_patterns": [
-      "wrong window frame"
-    ],
-    "related_patterns": []
-  },
-  {
-    "id": "wf_lag",
-    "title": "LAG previous row",
-    "intent_tags": [
-      "delta",
-      "comparison"
-    ],
-    "sql_features": [
-      "window"
-    ],
-    "difficulty": "intermediate",
-    "pattern_type": "analytical",
-    "template": "LAG(x) OVER(ORDER BY t)",
-    "when_to_use": [
-      "change detection"
-    ],
-    "anti_patterns": [
-      "no order"
+    "when_not_to_use": [
+      "user only wants the first/last row itself (not a value repeated on every row) — use a CTE + ROW_NUMBER dedupe instead (wf_row_number_dedup)",
+      "user wants the first/last value *across all rows*, not *per group* — use FIRST_VALUE without PARTITION BY, but consider if aggregation is simpler",
+      "user wants the first/last value *by time*, but the ordering is ambiguous — FIRST_VALUE/LAST_VALUE require deterministic ORDER BY; use a tiebreaker or dedupe first",
+      "user needs to get the *entire row* of the first/last record — FIRST_VALUE returns only one column; use ROW_NUMBER + filter instead"
     ],
     "related_patterns": [
-      "wf_lead"
-    ]
+      "wf_row_number_dedup", "wf_row_number_topn", "wf_cumulative_sum",
+      "ts_yoy_comparison", "seg_case_when"
+    ],
+    "concept_explanation": {
+      "what_it_does": "FIRST_VALUE(x) OVER (ORDER BY t) returns the value of x from the *first* row in the window frame. LAST_VALUE(x) is misleading — it returns the *last* row *within the current frame*, which defaults to CURRENT ROW unless you explicitly extend the frame to UNBOUNDED FOLLOWING.",
+      "mental_model": "FIRST_VALUE is easy — it's the value from the top of the sorted window. LAST_VALUE is a trap: the default frame is UNBOUNDED PRECEDING → CURRENT ROW, so LAST_VALUE always equals the current row's value. To get the *true* last value in the partition, extend the frame: LAST_VALUE(x) OVER (ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING).",
+      "key_behavior": "LAST_VALUE’s default frame includes only rows up to the current row, so unless you explicitly extend it to the full partition, LAST_VALUE will never be the *actual* last value — it will just replicate the current row’s value."
+    },
+    "template": {
+      "minimal": "-- Correct FIRST_VALUE (trivially)\nSELECT category, date, FIRST_VALUE(revenue) OVER (PARTITION BY category ORDER BY date) AS first_revenue\nFROM daily_metrics\n\n-- Correct LAST_VALUE\nSELECT category, date, LAST_VALUE(revenue) OVER (PARTITION BY category ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS last_revenue\nFROM daily_metrics",
+      "realistic": "-- First and last order date per customer, and first-order revenue as % of current order revenue\n-- For customers with multiple orders, we compare each order to their first and last\nWITH order_summary AS (\n  SELECT\n    c.customer_id,\n    c.customer_name,\n    o.order_id,\n    o.order_date,\n    o.total,\n    FIRST_VALUE(o.order_date) OVER (PARTITION BY c.customer_id ORDER BY o.order_date) AS first_order_date,\n    LAST_VALUE(o.order_date) OVER (\n      PARTITION BY c.customer_id\n      ORDER BY o.order_date\n      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\n    ) AS last_order_date,\n    FIRST_VALUE(o.total) OVER (PARTITION BY c.customer_id ORDER BY o.order_date) AS first_order_value\n  FROM orders o\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '1 year'\n)\nSELECT\n  customer_id,\n  customer_name,\n  order_id,\n  order_date,\n  total,\n  first_order_date,\n  last_order_date,\n  first_order_value,\n  ROUND(total / NULLIF(first_order_value, 0) * 100, 2) AS pct_of_first_order\nFROM order_summary\nORDER BY customer_id, order_date",
+      "composable": "-- Identify customers who made their *first* order in Q1 2024, then compare their *last* order in 2024 to Q1 baseline\n-- Composes: wf_first_last_frame + seg_case_when_classification\nWITH order_summary AS (\n  SELECT\n    c.customer_id,\n    o.order_date,\n    o.total,\n    FIRST_VALUE(o.order_date) OVER (PARTITION BY c.customer_id ORDER BY o.order_date) AS first_order_date,\n    LAST_VALUE(o.order_date) OVER (\n      PARTITION BY c.customer_id\n      ORDER BY o.order_date\n      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\n    ) AS last_order_date\n  FROM orders o\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= DATE '2024-01-01'\n),\nq1_customers AS (\n  SELECT DISTINCT customer_id\n  FROM order_summary\n  WHERE first_order_date >= DATE '2024-01-01' AND first_order_date < DATE '2024-04-01'\n),\nlast_orders AS (\n  SELECT\n    customer_id,\n    MAX(order_date) FILTER (WHERE order_date >= DATE '2024-01-01' AND order_date < DATE '2024-10-01') AS last_order_date,\n    SUM(total) FILTER (WHERE order_date >= DATE '2024-01-01' AND order_date < DATE '2024-10-01') AS lifetime_revenue\n  FROM order_summary\n  GROUP BY 1\n)\nSELECT\n  q.customer_id,\n  l.last_order_date,\n  l.lifetime_revenue,\n  CASE\n    WHEN l.last_order_date >= DATE '2024-09-01' THEN 'recent_activity'\n    ELSE 'stale'\n  END AS engagement_status\nFROM q1_customers q\nJOIN last_orders l ON q.customer_id = l.customer_id"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Assuming LAST_VALUE returns the partition’s last row by default",
+        "what_goes_wrong": "The default window frame for ORDER BY is ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW. LAST_VALUE(x) thus always equals the current row’s x value — it never reaches the actual last row of the partition.",
+        "symptom": "Every row in the output has last_order_date equal to its own order_date, and first/last values repeat the same number across rows.",
+        "bad_sql": "SELECT customer_id, order_date, LAST_VALUE(order_date) OVER (PARTITION BY customer_id ORDER BY order_date) AS last_order FROM orders",
+        "good_sql": "SELECT customer_id, order_date, LAST_VALUE(order_date) OVER (PARTITION BY customer_id ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS last_order FROM orders",
+        "detection_sql": "SELECT COUNT(*) AS mismatch FROM (\n  SELECT customer_id, order_date,\n         LAST_VALUE(order_date) OVER (PARTITION BY customer_id ORDER BY order_date) AS last_order,\n         MAX(order_date) OVER (PARTITION BY customer_id) AS max_order\n  FROM orders\n) WHERE last_order <> max_order"
+      },
+      {
+        "mistake": "Missing PARTITION BY when grouping by entity",
+        "what_goes_wrong": "Without PARTITION BY, FIRST_VALUE returns the *global* first row in the entire dataset (across all customers, products, etc.), not the first per group. Every row’s ‘first’ value is identical, even if it belongs to different groups.",
+        "symptom": "The first_order_date is the same for all customers (e.g., '2024-01-01'), even though individual customers’ first orders occurred later.",
+        "bad_sql": "SELECT customer_id, order_date, FIRST_VALUE(order_date) OVER (ORDER BY order_date) AS global_first FROM orders",
+        "good_sql": "SELECT customer_id, order_date, FIRST_VALUE(order_date) OVER (PARTITION BY customer_id ORDER BY order_date) AS customer_first FROM orders",
+        "detection_sql": "SELECT COUNT(DISTINCT FIRST_VALUE(order_date) OVER (ORDER BY order_date)) AS distinct_first_dates FROM orders"
+      },
+      {
+        "mistake": "Using FIRST_VALUE/LAST_VALUE on non-ordered columns",
+        "what_goes_wrong": "If ORDER BY is on a column unrelated to the one you want first/last (e.g., ORDER BY date but FIRST_VALUE(price)), the returned price is from the row that comes first *by date*, not the row with the extreme price.",
+        "symptom": "The first_order_date and first_order_price come from different rows that share the same partition but have different ordering criteria.",
+        "bad_sql": "SELECT customer_id, order_date, FIRST_VALUE(total) OVER (PARTITION BY customer_id ORDER BY order_date) AS first_order_price FROM orders",
+        "good_sql": "SELECT customer_id, order_date,\n       FIRST_VALUE(total) OVER (PARTITION BY customer_id ORDER BY total DESC) AS highest_order_price,\n       FIRST_VALUE(total) OVER (PARTITION BY customer_id ORDER BY total ASC) AS lowest_order_price\nFROM orders",
+        "detection_sql": "-- Check if first row by date has the expected extreme price:\nWITH ranked AS (\n  SELECT customer_id, order_date, total,\n         ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date) AS rn,\n         FIRST_VALUE(total) OVER (PARTITION BY customer_id ORDER BY order_date) AS first_total\n  FROM orders\n)\nSELECT COUNT(*) FROM ranked WHERE rn = 1 AND total <> first_total"
+      },
+      {
+        "mistake": "Using FIRST_VALUE to get the *entire row* instead of just one column",
+        "what_goes_wrong": "FIRST_VALUE only returns a *scalar* value (e.g., order_date), not the whole row (order_id, customer_id, total, etc.). Users often want the entire record of the first order, not just its date.",
+        "symptom": "The query returns only one column from the first row, and the user must join back to retrieve other details — inefficient and error-prone.",
+        "bad_sql": "SELECT customer_id, FIRST_VALUE(order_id) OVER (PARTITION BY customer_id ORDER BY order_date) AS first_order_id FROM orders",
+        "good_sql": "-- Better: get entire first row via ROW_NUMBER\nWITH ranked AS (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date) AS rn\n  FROM orders\n)\nSELECT * FROM ranked WHERE rn = 1",
+        "detection_sql": "SELECT COUNT(DISTINCT first_order_id) FROM (\n  SELECT customer_id, FIRST_VALUE(order_id) OVER (PARTITION BY customer_id ORDER BY order_date) AS first_order_id\n  FROM orders\n) WHERE customer_id IN (SELECT customer_id FROM orders GROUP BY 1 HAVING COUNT(*) > 1)"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "LAST_VALUE with default frame",
+        "duckdb_behavior": "DuckDB defaults to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW when ORDER BY is present. LAST_VALUE(x) thus returns the current row’s x, not the last in the partition.",
+        "postgres_behavior": "Same behavior. PostgreSQL documentation warns explicitly that LAST_VALUE requires explicit frame extension.",
+        "bigquery_behavior": "Same default frame and trap.",
+        "safe_alternative": "Always specify the frame explicitly for LAST_VALUE: LAST_VALUE(x) OVER (ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)."
+      },
+      {
+        "construct": "NULL handling in FIRST_VALUE/LAST_VALUE",
+        "duckdb_behavior": "NULLs are treated as lowest in ordering (so FIRST_VALUE may return NULL if NULLs sort first). LAST_VALUE with extended frame will include NULLs if they’re the last row.",
+        "postgres_behavior": "Same NULL ordering behavior by default.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Use COALESCE to substitute NULLs for business logic if needed: COALESCE(FIRST_VALUE(x), 0). If NULLs should be ignored in ordering, add ORDER BY x IS NULL, x to push NULLs last."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants a scalar value (e.g., first date, last price) repeated on every row in the partition",
+        "user wants to compute growth from baseline (e.g., current / first)",
+        "data is ordered correctly and the user only needs *one column* from the first/last row",
+        "user’s question includes 'first', 'last', 'earliest', 'latest', 'initial'"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants the *entire record* (all columns) from the first/last row",
+          "use_instead": "wf_row_number_dedup",
+          "why": "ROW_NUMBER + filter returns the full row without repeating it across all rows"
+        },
+        {
+          "condition": "user wants the first/last row per group but has NULLs in the ordering column",
+          "use_instead": "wf_row_number_dedup WITH NULL-safe ordering",
+          "why": "ROW_NUMBER gives explicit control over tiebreakers and NULL handling"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "first order", "latest value", "earliest date", "last order", "baseline",
+        "initial value", "start of period", "end of period"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Partition with only one row",
+        "what_happens": "FIRST_VALUE and LAST_VALUE return the same value (the only row). No NULLs introduced.",
+        "handling": "No change needed. The pattern is safe for single-row partitions."
+      },
+      {
+        "scenario": "Partition contains NULLs in the ORDER BY column",
+        "what_happens": "NULLs sort first by default in most SQL dialects. FIRST_VALUE may return NULL if NULLs exist. LAST_VALUE may also return NULL if trailing NULLs are last.",
+        "handling": "Use NULL-safe ordering: ORDER BY (ordering_col IS NULL), ordering_col to push NULLs last. Or filter NULLs first: WHERE ordering_col IS NOT NULL."
+      },
+      {
+        "scenario": "Partition key is NULL",
+        "what_happens": "All rows with NULL partition key share one partition. FIRST_VALUE/LAST_VALUE apply across that entire group, which may be unintended.",
+        "handling": "Filter NULLs or replace with a sentinel: WHERE partition_key IS NOT NULL or COALESCE(partition_key, 'Unknown') AS partition_key."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for the sort, O(n) for scanning. FIRST_VALUE is cheaper than LAST_VALUE with extended frame because it doesn’t need to scan the full partition — it only needs the first row.",
+      "when_slow": "Large partitions (>1M rows) with LAST_VALUE using UNBOUNDED FOLLOWING — the engine must scan all rows to find the last one for *every* row, effectively O(n²).",
+      "optimization_hint": "For LAST_VALUE, materialize the max ordering value in a CTE first, then join back. Or use a ROW_NUMBER dedupe if you only need one row. Avoid LAST_VALUE in high-partition-count schemas."
+    }
   },
   {
-    "id": "wf_lead",
-    "title": "LEAD next row",
+    "id": "wf_percent_of_total",
+    "title": "Percent of Total via Window SUM",
     "intent_tags": [
-      "forecast"
+      "percentage of total", "share of total", "contribution", " proportion",
+      "% of total", "weight", "market share", "segment share", "revenue share",
+      "breakdown", "contribution analysis", "what% of total", "占比"
     ],
-    "sql_features": [
-      "window"
-    ],
-    "difficulty": "intermediate",
+    "sql_features": ["window", "sum_over", "cte", "percent_rank"],
+    "difficulty": "beginner",
     "pattern_type": "analytical",
-    "template": "LEAD(x) OVER(ORDER BY t)",
     "when_to_use": [
-      "next value"
+      "user wants to know what portion of the grand total each row contributes",
+      "building a Pareto analysis (80/20 rule) or concentration metrics",
+      "calculating segment share (e.g., category sales % of total, region % of revenue)",
+      "creating percentage-based KPIs (e.g., top 10% of customers by spend)",
+      "normalizing values for comparison across scales (e.g., pageviews % of total traffic)"
     ],
-    "anti_patterns": [],
+    "when_not_to_use": [
+      "user wants the percentage *within a group*, not the grand total — use SUM() OVER (PARTITION BY group) to get group totals instead",
+      "user wants percentage of a *running* or *rolling* total — use a different window with a constrained frame (e.g., wf_sliding_window)",
+      "user needs to compare percentages *over time* — percent of total for each period is independent; use time-series patterns like wf_cumulative_sum instead",
+      "user wants the *count* of rows contributing to each total — use COUNT OVER without SUM"
+    ],
     "related_patterns": [
-      "wf_lag"
-    ]
+      "wf_cumulative_sum", "wf_sliding_window", "stat_percentile_distribution",
+      "seg_case_when", "ts_yoy_comparison"
+    ],
+    "concept_explanation": {
+      "what_it_does": "SUM(column) OVER () computes the grand total across all rows (no PARTITION BY), and dividing a row’s value by that SUM gives its share of the total. SUM(column) OVER (PARTITION BY group) computes group totals, enabling percentages within each group.",
+      "mental_model": "Imagine stacking all values in one column into one pile. Each row’s percentage is (its own value) / (size of the pile). For per-group percentages, imagine stacking separately for each group — each group has its own pile.",
+      "key_behavior": "SUM OVER () without PARTITION BY produces the *same* total for every row — it’s not a running total. To compute percentages, simply divide each value by that constant. The window is computed once per query, not per row."
+    },
+    "template": {
+      "minimal": "-- Grand total %\nSELECT category, revenue, revenue / SUM(revenue) OVER () * 100 AS pct_of_total\nFROM sales\n\n-- Group total %\nSELECT category, subcategory, revenue, revenue / SUM(revenue) OVER (PARTITION BY category) * 100 AS pct_of_category\nFROM sales",
+      "realistic": "-- Revenue share per product, and % of category revenue\nWITH category_revenue AS (\n  SELECT\n    p.category,\n    p.product_name,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY 1, 2\n)\nSELECT\n  category,\n  product_name,\n  revenue,\n  ROUND(revenue / SUM(revenue) OVER () * 100, 2) AS pct_of_grand_total,\n  ROUND(revenue / SUM(revenue) OVER (PARTITION BY category) * 100, 2) AS pct_of_category\nFROM category_revenue\nORDER BY pct_of_grand_total DESC\nLIMIT 100",
+      "composable": "-- Top 20% products by revenue (using window percent rank) + share of total\n-- Composes: wf_percent_of_total + stat_percentile_distribution\nWITH product_revenue AS (\n  SELECT\n    p.product_name,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  GROUP BY 1\n),\nwith_percentiles AS (\n  SELECT\n    product_name,\n    revenue,\n    PERCENT_RANK() OVER (ORDER BY revenue DESC) AS rev_rank_pct,\n    revenue / SUM(revenue) OVER () * 100 AS pct_of_total\n  FROM product_revenue\n)\nSELECT product_name, revenue, rev_rank_pct, pct_of_total\nFROM with_percentiles\nWHERE rev_rank_pct <= 0.2\nORDER BY revenue DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Omitting OVER () and using plain SUM",
+        "what_goes_wrong": "SUM(revenue) without OVER becomes an aggregate function, collapsing all rows into one group. The query returns only one row (grand total), not one row per product with its share.",
+        "symptom": "Query returns a single row with total revenue, and an error or NULL for product-level data. Or with GROUP BY, it returns per-group totals, not shares.",
+        "bad_sql": "SELECT product_name, revenue, revenue / SUM(revenue) AS pct FROM sales GROUP BY 1, 2",
+        "good_sql": "SELECT product_name, revenue, revenue / SUM(revenue) OVER () * 100 AS pct FROM sales",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT product_name, revenue, revenue / SUM(revenue) AS pct FROM sales GROUP BY 1, 2\n) LIMIT 1"
+      },
+      {
+        "mistake": "Dividing SUM per row by SUM OVER () while also grouping",
+        "what_goes_wrong": "If you GROUP BY product_name and try to compute SUM(revenue) OVER (), you get an error because OVER cannot be used in an aggregate context without a window function in the SELECT. Or you accidentally compute a wrong share.",
+        "symptom": "SQL syntax error, or the percentage is computed incorrectly due to double aggregation.",
+        "bad_sql": "SELECT product_name, SUM(revenue) AS revenue, SUM(revenue) / SUM(SUM(revenue)) OVER () * 100 FROM sales GROUP BY 1",
+        "good_sql": "WITH t AS (SELECT product_name, SUM(revenue) AS revenue FROM sales GROUP BY 1)\nSELECT product_name, revenue, revenue / SUM(revenue) OVER () * 100 FROM t",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT product_name, SUM(revenue) AS revenue, SUM(revenue) / SUM(SUM(revenue)) OVER () * 100\n  FROM sales\n  GROUP BY 1\n) LIMIT 1"
+      },
+      {
+        "mistake": "Using GROUP BY + window function without CTE wrapper",
+        "what_goes_wrong": "In some SQL engines, mixing GROUP BY with window functions directly in the same SELECT can produce ambiguous results or errors. DuckDB allows it but may compute window functions *before* aggregation unless aliased.",
+        "symptom": "The percentage doesn’t match expectations — it computes over the raw row count, not the aggregated group totals.",
+        "bad_sql": "SELECT category, SUM(revenue) AS revenue, SUM(revenue) / SUM(SUM(revenue)) OVER () * 100\nFROM sales\nGROUP BY 1",
+        "good_sql": "WITH t AS (SELECT category, SUM(revenue) AS revenue FROM sales GROUP BY 1)\nSELECT category, revenue, revenue / SUM(revenue) OVER () * 100 FROM t",
+        "detection_sql": "SELECT * FROM (\n  SELECT category, SUM(revenue) AS revenue, SUM(revenue) / SUM(SUM(revenue)) OVER () * 100 AS pct\n  FROM sales\n  GROUP BY 1\n) WHERE pct > 100 OR pct < 0"
+      },
+      {
+        "mistake": "Confusing grand total vs group total",
+        "what_goes_wrong": "Using SUM OVER () instead of SUM OVER (PARTITION BY group) when the user wants percentages *within* a segment (e.g., % of category revenue). All rows get compared to the grand total, making subcategory shares appear smaller than they are.",
+        "symptom": "Category subcategory percentages add up to less than 100% (they should add to ~100% within each category).",
+        "bad_sql": "SELECT category, subcategory, revenue, revenue / SUM(revenue) OVER () * 100 FROM sales",
+        "good_sql": "SELECT category, subcategory, revenue, revenue / SUM(revenue) OVER (PARTITION BY category) * 100 FROM sales",
+        "detection_sql": "SELECT category, SUM(pct_of_category) AS total_pct\nFROM (\n  SELECT category, subcategory, revenue,\n         revenue / SUM(revenue) OVER (PARTITION BY category) * 100 AS pct_of_category\n  FROM sales\n) t\nGROUP BY category\nHAVING ABS(SUM(pct_of_category) - 100) > 0.5"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "SUM OVER () vs plain SUM in DuckDB",
+        "duckdb_behavior": "DuckDB permits mixing aggregate functions with window functions in the same SELECT *if* the window function is defined. But ambiguous grouping can cause silent errors — it’s safer to use a CTE.",
+        "postgres_behavior": "Same behavior. Both support OVER () without PARTITION BY.",
+        "bigquery_behavior": "Same, but BQ enforces explicit window definitions more strictly.",
+        "safe_alternative": "Wrap aggregations in a CTE, then apply window functions in an outer SELECT. Avoid mixing GROUP BY and window functions in one query unless confident."
+      },
+      {
+        "construct": "NULL handling in SUM OVER",
+        "duckdb_behavior": "SUM ignores NULLs. SUM OVER () will exclude NULLs from the grand total, which may bias percentage calculations.",
+        "postgres_behavior": "Same.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "COALESCE(column, 0) before aggregation if NULLs represent zero. If NULLs are missing data, filter them out or handle explicitly."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants percentage of the *grand total* (no grouping) or *group total*",
+        "user needs to compare contributions across entities (e.g., products, regions)",
+        "user’s question includes 'share of', '% of total', 'contribution to', 'percentage of'",
+        "user wants to build Pareto charts or concentration analysis (top 10% contributors)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants percentage of a *running* or *cumulative* total (not a static total)",
+          "use_instead": "wf_cumulative_sum",
+          "why": "Cumulative SUM with a constrained frame provides percentages of the accumulated value, not the static total"
+        },
+        {
+          "condition": "user wants to rank entities by contribution and find top N% contributors",
+          "use_instead": "stat_percentile_distribution",
+          "why": "PERCENT_RANK and PERCENTILE_CONT directly compute contribution ranks"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "share of", "% of total", "contribution", "percentage of total",
+        "what% of", "proportion", "weight", "market share"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Grand total is zero",
+        "what_happens": "Division by zero produces Infinity or an error. All percentages become NULL or fail.",
+        "handling": "Use NULLIF: revenue / NULLIF(SUM(revenue) OVER (), 0) * 100. Or filter out rows where total = 0 before calculation."
+      },
+      {
+        "scenario": "All rows have zero value",
+        "what_happens": "Same as above — division by zero. Percentages are undefined.",
+        "handling": "Treat as a special case: CASE WHEN SUM(revenue) OVER () = 0 THEN 0 ELSE revenue / SUM(revenue) OVER () * 100 END."
+      },
+      {
+        "scenario": "Group has only one row",
+        "what_happens": "Percentage = 100% by definition. No issue — the math holds.",
+        "handling": "No adjustment needed. The pattern is robust for single-row groups."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) — window SUM OVER () is computed in one pass. Very fast.",
+      "when_slow": "None — it’s linear time. Only overhead comes from very large row counts (>1B rows), where memory for the sum may matter.",
+      "optimization_hint": "No optimization needed. But if percentages are only needed for top contributors, compute SUM OVER () once in a CTE and filter rows before calculating percentages."
+    }
   },
   {
-    "id": "wf_first_value",
-    "title": "FIRST_VALUE",
+    "id": "wf_row_number_dedup",
+    "title": "ROW_NUMBER for Deduplication",
     "intent_tags": [
-      "baseline"
+      "remove duplicates", "keep latest", "latest record", "most recent", "dedupe",
+      "unique per key", "last record", "first record", "clean records",
+      "remove duplicates by date", "keep most recent", "distinct key latest",
+      "top 1 per group", "best record", "most recent order"
     ],
-    "sql_features": [
-      "window"
-    ],
-    "difficulty": "intermediate",
-    "pattern_type": "analytical",
-    "template": "FIRST_VALUE(x) OVER(PARTITION BY g ORDER BY t)",
+    "sql_features": ["row_number", "window", "cte", "order_by"],
+    "difficulty": "beginner",
+    "pattern_type": "correctness",
     "when_to_use": [
-      "baseline comparison"
+      "user wants exactly one record per group (e.g., one order per customer, latest event per user)",
+      "data has duplicate keys due to system ingestion (e.g., multiple loads, retries)",
+      "user wants the *latest* (or *earliest*) record per key based on timestamp",
+      "preparing data for joins where one-to-one mapping is required",
+      "eliminating duplicate rows while keeping the most business-relevant record"
     ],
-    "anti_patterns": [],
-    "related_patterns": []
-  },
-  {
-    "id": "wf_last_value",
-    "title": "LAST_VALUE",
-    "intent_tags": [
-      "latest"
+    "when_not_to_use": [
+      "user wants to keep *all* duplicates but just identify them — use aggregation or QUALIFY instead",
+      "user wants the *top N* records per group (e.g., top 3 sales) — use wf_row_number_topn instead",
+      "user needs deterministic deduplication without a clear ordering column — add a surrogate key or loaded_at timestamp as tiebreaker",
+      "user wants to deduplicate *globally* (not per key) — use DISTINCT, not ROW_NUMBER"
     ],
-    "sql_features": [
-      "window"
+    "related_patterns": [
+      "wf_row_number_topn", "wf_rank", "wf_dense_rank", "ts_date_spine",
+      "agg_grouping"
     ],
-    "difficulty": "advanced",
-    "pattern_type": "analytical",
-    "template": "LAST_VALUE(x) OVER(...)",
-    "when_to_use": [
-      "latest value"
+    "concept_explanation": {
+      "what_it_does": "ROW_NUMBER() OVER (PARTITION BY key ORDER BY timestamp DESC) assigns 1 to the most recent record per key, allowing you to filter WHERE rn = 1 to keep only one record per group.",
+      "mental_model": "Imagine grouping all rows by customer_id and lining them up in date order. ROW_NUMBER() writes a sequential number on each row, starting at 1 for the most recent (if ORDER BY DESC). Filtering rn=1 keeps the latest for each customer.",
+      "key_behavior": "The tiebreaker matters — if two rows have the *exact* same timestamp, ROW_NUMBER arbitrarily picks one. Add a secondary ORDER BY column (e.g., order_id, loaded_at) to ensure deterministic ordering."
+    },
+    "template": {
+      "minimal": "SELECT * FROM (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn\n  FROM orders\n) WHERE rn = 1",
+      "realistic": "-- Keep only the latest order per customer (handles duplicate customer_id due to re-imports)\n-- Grain: one row per customer with their most recent order\nWITH ranked_orders AS (\n  SELECT\n    o.*,\n    ROW_NUMBER() OVER (\n      PARTITION BY customer_id\n      ORDER BY order_date DESC, order_id DESC  -- tiebreaker: prefer higher IDs\n    ) AS rn\n  FROM orders o\n  WHERE o.status NOT IN ('cancelled', 'test')\n)\nSELECT *\nFROM ranked_orders\nWHERE rn = 1\nORDER BY order_date DESC\nLIMIT 100",
+      "composable": "-- Deduplicate users to their latest activity, then classify users as 'active' vs 'dormant'\n-- Composes: wf_row_number_dedup + seg_case_when_classification\nWITH latest_activity AS (\n  SELECT *,\n         ROW_NUMBER() OVER (\n           PARTITION BY user_id\n           ORDER BY event_time DESC, event_id DESC\n         ) AS rn\n  FROM events\n),\nactive_users AS (\n  SELECT * FROM latest_activity WHERE rn = 1\n)\nSELECT\n  user_id,\n  event_time AS last_event_time,\n  event_type AS last_event_type,\n  CASE\n    WHEN last_event_time >= CURRENT_DATE - INTERVAL '7 days' THEN 'active'\n    WHEN last_event_time >= CURRENT_DATE - INTERVAL '30 days' THEN 'dormant'\n    ELSE 'churned'\n  END AS user_status\nFROM active_users"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Missing tiebreaker in ORDER BY",
+        "what_goes_wrong": "If two rows have identical ORDER BY values (e.g., same timestamp), ROW_NUMBER assigns arbitrary ranks (1,2 or 2,1) depending on physical storage order. Re-running the query may return different 'latest' records.",
+        "symptom": "The latest_order_id for a customer changes between query executions, even though the data hasn’t changed.",
+        "bad_sql": "SELECT * FROM (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn\n  FROM orders\n) WHERE rn = 1",
+        "good_sql": "SELECT * FROM (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC, order_id DESC) AS rn\n  FROM orders\n) WHERE rn = 1",
+        "detection_sql": "SELECT customer_id, COUNT(*) AS duplicate_ranks\nFROM (\n  SELECT customer_id, order_id,\n         ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn\n  FROM orders\n) WHERE rn = 1\nGROUP BY customer_id\nHAVING COUNT(*) > 1"
+      },
+      {
+        "mistake": "Filtering by rn=1 before materializing the CTE",
+        "what_goes_wrong": "In some engines, placing the rn filter in a subquery without proper aliasing can cause the window function to be re-evaluated or fail. DuckDB is robust, but nested queries risk ambiguity.",
+        "symptom": "Query fails with 'window function is not allowed in WHERE' or returns inconsistent results.",
+        "bad_sql": "SELECT * FROM orders WHERE ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) = 1",
+        "good_sql": "WITH ranked AS (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC, order_id DESC) AS rn\n  FROM orders\n) SELECT * FROM ranked WHERE rn = 1",
+        "detection_sql": "SELECT COUNT(*) FROM orders WHERE id IN (\n  SELECT id FROM (\n    SELECT id, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn\n    FROM orders\n  ) WHERE rn = 1\n) -- count should match unique customers"
+      },
+      {
+        "mistake": "Using ROW_NUMBER instead of RANK/DENSE_RANK for ties",
+        "what_goes_wrong": "If multiple rows are tied for 'latest' and you want to keep *all* tied rows, ROW_NUMBER picks only one arbitrarily. RANK/DENSE_RANK would assign the same rank to tied rows.",
+        "symptom": "Data loss — some 'latest' records disappear when they’re equally recent.",
+        "bad_sql": "SELECT * FROM (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn\n  FROM orders\n) WHERE rn = 1",
+        "good_sql": "SELECT * FROM (\n  SELECT *, RANK() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rnk\n  FROM orders\n) WHERE rnk = 1",
+        "detection_sql": "SELECT customer_id, COUNT(*) AS tie_count\nFROM (\n  SELECT customer_id, order_date,\n         RANK() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rnk\n  FROM orders\n) WHERE rnk = 1\nGROUP BY customer_id\nHAVING COUNT(*) > 1"
+      },
+      {
+        "mistake": "Deduplication without considering NULLs in the partition key",
+        "what_goes_wrong": "If customer_id is NULL for some rows, all NULLs are grouped together. The query may 'deduplicate' all NULL-key rows down to one, losing the ability to distinguish them.",
+        "symptom": "NULL customer_id orders appear as one record instead of multiple unique orders.",
+        "bad_sql": "SELECT * FROM (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn\n  FROM orders\n) WHERE rn = 1",
+        "good_sql": "SELECT * FROM (\n  SELECT *,\n         ROW_NUMBER() OVER (\n           PARTITION BY COALESCE(customer_id, 'UNKNOWN'), order_id -- or other tiebreaker\n           ORDER BY order_date DESC\n         ) AS rn\n  FROM orders\n) WHERE rn = 1",
+        "detection_sql": "SELECT COUNT(*) AS null_customers FROM orders WHERE customer_id IS NULL"
+      }
     ],
-    "anti_patterns": [
-      "frame issues"
+    "dialect_traps": [
+      {
+        "construct": "QUALIFY support for filtering window results",
+        "duckdb_behavior": "DuckDB supports QUALIFY, allowing WHERE rn = 1 without a CTE: QUALIFY ROW_NUMBER() OVER (PARTITION BY ...) = 1.",
+        "postgres_behavior": "Not supported — QUALIFY is not in standard Postgres. Must use CTE or subquery.",
+        "bigquery_behavior": "Supported natively.",
+        "safe_alternative": "For portability, use CTE + WHERE. If targeting DuckDB exclusively, QUALIFY saves nesting."
+      },
+      {
+        "construct": "ORDER BY NULLS FIRST vs LAST",
+        "duckdb_behavior": "By default, NULLs sort *last* in ascending order and *first* in descending order. This can flip which row is marked rn=1 if the partition key has NULLs.",
+        "postgres_behavior": "Same default behavior.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Explicitly define NULL ordering: ORDER BY order_date DESC NULLS LAST (or FIRST) to ensure deterministic tie handling."
+      }
     ],
-    "related_patterns": []
+    "decision_logic": {
+      "choose_this_when": [
+        "user explicitly wants *one* record per group, and 'latest' is well-defined",
+        "data has clear duplication (e.g., multiple loads, retries)",
+        "user’s question includes 'latest', 'most recent', 'latest record', 'dedupe'",
+        "a deterministic tiebreaker column exists (e.g., order_id, loaded_at)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to keep *all* tied records (not just one)",
+          "use_instead": "wf_dense_rank",
+          "why": "RANK/DENSE_RANK assign the same rank to ties, allowing WHERE rnk = 1 to keep all tied rows"
+        },
+        {
+          "condition": "user wants top *N* records per group (e.g., top 3 sales) instead of top 1",
+          "use_instead": "wf_row_number_topn",
+          "why": "Top-N uses rn <= N or rnk <= N to keep multiple rows"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "keep latest", "latest record", "deduplicate", "remove duplicates",
+        "most recent", "first record", "unique by"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Partition key is NULL",
+        "what_happens": "All NULL keys group together and are deduplicated to one row. Useful if you want a single 'unknown' record, but problematic if NULLs represent distinct items.",
+        "handling": "Replace NULL partition keys with a sentinel: COALESCE(customer_id, 'UNKNOWN'). Or filter NULLs first."
+      },
+      {
+        "scenario": "Tied ORDER BY values exist",
+        "what_happens": "ROW_NUMBER picks one arbitrarily. The 'latest' record may change between runs.",
+        "handling": "Add a deterministic tiebreaker column: ORDER BY order_date DESC, order_id DESC."
+      },
+      {
+        "scenario": "Partition has only one row",
+        "what_happens": "rn = 1 for that row — no issue. Deduplication succeeds trivially.",
+        "handling": "No change needed. The pattern works for single-row partitions."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) — dominated by the partitioned sort in ROW_NUMBER.",
+      "when_slow": "Large partitions (>5M rows) or high-partition-count schemas (e.g., 1M customers with 10 rows each). Sorting per partition is costly.",
+      "optimization_hint": "Filter to relevant rows *before* applying ROW_NUMBER (e.g., WHERE order_date > '2024-01-01'). Materialize pre-filtered CTE if reused. Consider adding indexes on PARTITION BY and ORDER BY columns."
+    }
   }
 ]

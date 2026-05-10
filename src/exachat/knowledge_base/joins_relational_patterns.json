@@ -1,0 +1,661 @@
+[
+  {
+    "id": "join_fanout_detection",
+    "title": "Fan-out Detection and Prevention",
+    "intent_tags": [
+      "row multiplication", "duplicate rows after join", "cardinality mismatch",
+      "JOIN causing duplicates", "one-to-many join", "pre-aggregate before join",
+      "prevent duplicates", "JOIN bloat", "row explosion", "many-to-many join"
+    ],
+    "sql_features": ["join", "left_join", "inner_join", "aggregation", "group_by"],
+    "difficulty": "intermediate",
+    "pattern_type": "relational",
+    "when_to_use": [
+      "user notices query returns *more rows* after a JOIN than before — suspecting fan-out",
+      "user’s question includes 'why are there duplicates?', 'JOIN doubled the rows'",
+      "preparing data for aggregation to avoid double-counting (e.g., summing revenue from a child table multiple times)",
+      "debugging unexpected row counts after JOIN operations"
+    ],
+    "when_not_to_use": [
+      "user wants to preserve *all* child records (e.g., listing all order items per order) — fan-out is expected and correct",
+      "user needs *many-to-many* joins (e.g., linking orders to customers and products) — fan-out is inherent",
+      "performance is not a concern and duplicate rows are handled downstream (e.g., reporting tools)"
+    ],
+    "related_patterns": [
+      "join_anti", "join_semi", "agg_preagg_before_join",
+      "join_self", "dq_grain_assertion"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Fan-out occurs when a JOIN multiplies rows because the join key is not unique on *one or both* sides (e.g., one order to many order_items). Detection compares row counts before and after the JOIN; prevention pre-aggregates the child table to a unique key before joining.",
+      "mental_model": "Imagine a mailing list (one row per person) combined with a purchase list (one row per purchase). If a person made 5 purchases, the joined list now has 5 rows for that person — the *person* is duplicated. Pre-aggregating purchases (e.g., sum per person) restores one row per person.",
+      "key_behavior": "Fan-out is *not* an error — it’s a reflection of the data model. The problem is when downstream operations (e.g., SUM, COUNT) *double-count* because of the duplication. Always verify grain before aggregation after JOIN."
+    },
+    "template": {
+      "minimal": "-- Detection: compare row counts before and after JOIN\nSELECT 'before' AS stage, COUNT(*) AS rows FROM orders\nUNION ALL\nSELECT 'after', COUNT(*)\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id",
+      "realistic": "-- Prevention: pre-aggregate order_items to one row per order, then join\n-- This avoids fan-out and prevents double-counting revenue in the final query\nWITH order_revenue AS (\n  -- Pre-aggregate to one row per order (unique grain: order_id)\n  SELECT\n    order_id,\n    SUM(quantity * unit_price) AS order_total,\n    COUNT(*) AS item_count\n  FROM order_items\n  GROUP BY order_id\n),\njoined AS (\n  SELECT\n    o.order_id,\n    o.order_date,\n    o.customer_id,\n    c.region,\n    COALESCE(r.order_total, 0) AS order_total,\n    r.item_count\n  FROM orders o\n  LEFT JOIN order_revenue r ON o.order_id = r.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n)\nSELECT\n  region,\n  COUNT(*) AS order_count,\n  SUM(order_total) AS total_revenue,\n  AVG(item_count) AS avg_items_per_order\nFROM joined\nGROUP BY region",
+      "composable": "-- Pre-aggregate order_items to order_id level, then join to orders, then aggregate by customer region\n-- Composes: join_fanout_detection + agg_group_rollup\nWITH order_revenue AS (\n  SELECT order_id, SUM(quantity * unit_price) AS order_total\n  FROM order_items\n  GROUP BY order_id\n),\norder_region AS (\n  SELECT\n    o.order_id,\n    c.region\n  FROM orders o\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n)\nSELECT\n  r.region,\n  COUNT(*) AS order_count,\n  SUM(COALESCE(oi.order_total, 0)) AS revenue\nFROM order_region r\nLEFT JOIN order_revenue oi ON r.order_id = oi.order_id\nGROUP BY r.region\nORDER BY revenue DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Not checking row counts before/after JOIN",
+        "what_goes_wrong": "Without detection, users assume row counts are correct and double-count aggregates (e.g., SUM(revenue) returns 2× expected because each order is duplicated for each item).",
+        "symptom": "Final revenue totals are unexpectedly high — e.g., $2M instead of $1M, and no clear reason.",
+        "bad_sql": "SELECT SUM(oi.quantity * oi.unit_price) AS revenue\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id",
+        "good_sql": "WITH order_revenue AS (\n  SELECT order_id, SUM(quantity * unit_price) AS order_total\n  FROM order_items\n  GROUP BY order_id\n)\nSELECT SUM(order_total) AS revenue FROM order_revenue",
+        "detection_sql": "SELECT 'items' AS table, COUNT(*) AS rows FROM order_items\nUNION ALL\nSELECT 'orders', COUNT(*) FROM orders\nUNION ALL\nSELECT 'joined', COUNT(*) FROM orders o JOIN order_items oi ON o.order_id = oi.order_id"
+      },
+      {
+        "mistake": "Pre-aggregating on the *wrong* grain",
+        "what_goes_wrong": "If pre-aggregation uses a non-unique key (e.g., customer_id instead of order_id), multiple orders per customer get summed into one — causing under-counting and loss of order-level detail.",
+        "symptom": "Revenue totals are too low — e.g., one order_total per customer, even though a customer made 5 orders.",
+        "bad_sql": "WITH customer_revenue AS (\n  SELECT customer_id, SUM(quantity * unit_price) AS total\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  GROUP BY customer_id  -- ❌ wrong grain: multiple orders per customer\n)\nSELECT SUM(total) FROM customer_revenue",
+        "good_sql": "WITH order_revenue AS (\n  SELECT order_id, SUM(quantity * unit_price) AS total\n  FROM order_items\n  GROUP BY order_id  -- ✅ grain = order_id (unique)\n)\nSELECT SUM(total) FROM order_revenue",
+        "detection_sql": "SELECT customer_id, COUNT(*) AS order_count\nFROM orders\nGROUP BY customer_id\nHAVING COUNT(*) > 1\nORDER BY order_count DESC LIMIT 5"
+      },
+      {
+        "mistake": "Using LEFT JOIN but forgetting COALESCE for NULL pre-aggregated values",
+        "what_goes_wrong": "Orders without items get NULL order_total from pre-aggregation. If SUM(order_total) is used, NULLs cause the total to be NULL or unexpected — the user expects 0 for no items.",
+        "symptom": "SUM(order_total) is NULL or missing for some regions, even though orders exist.",
+        "bad_sql": "SELECT region, SUM(order_total) AS revenue FROM joined GROUP BY region", 
+        "good_sql": "SELECT region, SUM(COALESCE(order_total, 0)) AS revenue FROM joined GROUP BY region",
+        "detection_sql": "SELECT COUNT(*) FROM joined WHERE order_total IS NULL"
+      },
+      {
+        "mistake": "Pre-aggregating *after* JOIN instead of before",
+        "what_goes_wrong": "If aggregation happens *after* the fan-out JOIN, the aggregation still counts duplicates — defeating the purpose. Fan-out prevention must happen *before* JOIN.",
+        "symptom": "Pre-aggregation appears in the query, but fan-out still causes double-counting — e.g., SUM(order_total) uses the pre-aggregated table, but that table is joined to orders *again*, duplicating orders.",
+        "bad_sql": "SELECT SUM(order_total) FROM (\n  SELECT o.order_id, SUM(oi.quantity * oi.unit_price) AS order_total\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  GROUP BY o.order_id  -- ❌ fan-out still occurs before aggregation\n) t",
+        "good_sql": "WITH order_revenue AS (\n  SELECT order_id, SUM(quantity * unit_price) AS order_total\n  FROM order_items\n  GROUP BY order_id  -- ✅ pre-aggregate before JOIN\n)\nSELECT SUM(order_total) FROM order_revenue",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT o.order_id, SUM(oi.quantity * oi.unit_price) AS order_total\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  GROUP BY o.order_id\n) t"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "DuckDB vs Postgres JOIN optimization",
+        "duckdb_behavior": "DuckDB automatically optimizes fan-out patterns when pre-aggregation is clear. However, complex joins may require explicit CTEs for readability.",
+        "postgres_behavior": "Postgres may not optimize pre-aggregation away in some cases — explicit CTEs help plan clarity.",
+        "bigquery_behavior": "BigQuery handles fan-out similarly, but large intermediate tables can cause slowdowns.",
+        "safe_alternative": "Use explicit CTEs for pre-aggregation — it’s clearer and works identically across dialects."
+      },
+      {
+        "construct": "Fan-out in materialized views",
+        "duckdb_behavior": "DuckDB’s materialized views *do not* prevent fan-out — they store raw joins, so repeated queries may still see row multiplication.",
+        "postgres_behavior": "Same — materialized views store the join result, not aggregated data.",
+        "bigquery_behavior": "Same — fan-out risk remains.",
+        "safe_alternative": "If fan-out is a frequent issue, store pre-aggregated facts (e.g., one row per order) in a summary table, not raw joins."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user’s row count increases unexpectedly after JOIN and downstream aggregates are wrong",
+        "user’s question includes 'how do I fix duplicates?', 'prevent double-counting'",
+        "the child table has multiple rows per parent key (one-to-many join)",
+        "performance matters — fan-out causes memory and I/O bloat"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to *list* all child records (e.g., order items per order)",
+          "use_instead": "join_inner",
+          "why": "Fan-out is expected and correct — use it, but flag that counts may be inflated"
+        },
+        {
+          "condition": "user wants *many-to-many* joins (e.g., orders to customers and products)",
+          "use_instead": "join_semi",
+          "why": "Fan-out is inherent; use semi-joins to filter or pre-aggregate carefully"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "prevent duplicates", "row multiplication", "double-counting",
+        "fan-out", "JOIN causing duplicates"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "One side has zero rows",
+        "what_happens": "LEFT JOIN returns 0 rows from child side, NULL for pre-aggregated fields. COALESCE handles it. No fan-out — 0 × anything = 0.",
+        "handling": "No issue — pre-aggregation with GROUP BY on empty data returns no rows, so COALESCE ensures 0 in final aggregates."
+      },
+      {
+        "scenario": "Child table has *one* row per parent (one-to-one join)",
+        "what_happens": "No fan-out — row count unchanged. Pre-aggregation is unnecessary but harmless.",
+        "handling": "No change needed. Pre-aggregation still works, though it adds a redundant GROUP BY."
+      },
+      {
+        "scenario": "Child table is huge (millions of rows)",
+        "what_happens": "Fan-out can cause intermediate tables to grow 100× — e.g., 1M orders × 10 items each = 10M rows. Pre-aggregation reduces this to 1M rows.",
+        "handling": "Pre-aggregation is critical here — it avoids OOM. Also, filter child rows before pre-aggregation (e.g., WHERE order_date > ...)."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "Fan-out causes O × M rows (where O = parent rows, M = child rows per parent). Pre-aggregation reduces to O + (child rows + group by) = O + child rows.",
+      "when_slow": "Large child tables (e.g., 100M+ rows) joined to parent — fan-out causes 1B+ row intermediates, causing OOM or disk spilling.",
+      "optimization hint": "Always pre-aggregate child tables to unique parent keys before joining. Filter child rows *before* aggregation (e.g., WHERE order_date > ...). For very large tables, materialize pre-aggregated CTEs."
+    }
+  },
+  {
+    "id": "join_anti",
+    "title": "Anti Join for Finding Missing Records",
+    "intent_tags": [
+      "find missing", "LEFT JOIN IS NULL", "NOT EXISTS", "EXCEPT", "orphaned records",
+      "find unmatched", "missing records", "left join null", "anti join",
+      "find missing parent", "find missing child", "orphaned data"
+    ],
+    "sql_features": ["left_join", "anti_join", "semi_join", "exists", "not_exists", "except"],
+    "difficulty": "beginner",
+    "pattern_type": "relational",
+    "when_to_use": [
+      "user wants to find records in one table that *don’t* have a match in another (e.g., customers with no orders)",
+      "user’s question includes 'find customers with no orders', 'missing parents', 'orphaned records'",
+      "validating referential integrity (e.g., order_items with non-existent orders)",
+      "identifying gaps in ETL (e.g., customers who signed up but never logged in)"
+    ],
+    "when_not_to_use": [
+      "user wants records that *do* have matches — use inner join or semi-join instead",
+      "performance is critical and anti-join is slow on large tables — consider EXCEPT or NOT IN with pre-filtered subquery",
+      "user needs *exact* row counts — anti-joins may be slower than alternatives"
+    ],
+    "related_patterns": [
+      "join_semi", "join_self", "dq_referential_integrity",
+      "agg_approx_distinct", "join_fanout_detection"
+    ],
+    "concept_explanation": {
+      "what_it_does": "An anti-join returns rows from table A that have *no* matching rows in table B. It can be written as LEFT JOIN ... WHERE B.key IS NULL, NOT EXISTS (SELECT ...), or EXCEPT. All three are logically equivalent, but performance and semantics vary.",
+      "mental_model": "Imagine two piles of cards: pile A (customers) and pile B (orders). An anti-join finds all cards in pile A that don’t have a matching card in pile B. It’s like a reverse inner join."
+    },
+    "template": {
+      "minimal": "-- Customers with no orders (using LEFT JOIN + IS NULL)\nSELECT c.customer_id, c.email\nFROM customers c\nLEFT JOIN orders o ON c.customer_id = o.customer_id\nWHERE o.order_id IS NULL",
+      "realistic": "-- Find customers who signed up but never placed an order (customer_id in customers, not in orders)\n-- Grain: one row per unmatched customer\nSELECT\n  c.customer_id,\n  c.email,\n  c.signup_date,\n  c.region\nFROM customers c\nLEFT JOIN orders o ON c.customer_id = o.customer_id\nWHERE o.order_id IS NULL\nORDER BY c.signup_date ASC\nLIMIT 100",
+      "composable": "-- Find customers who signed up >30 days ago but never ordered — then send a 'welcome back' email\n-- Composes: join_anti + seg_case_when_classification\nWITH signups AS (\n  SELECT\n    customer_id,\n    email,\n    signup_date,\n    region\n  FROM customers\n  WHERE signup_date < CURRENT_DATE - INTERVAL '30 days'\n),\norderers AS (\n  SELECT DISTINCT customer_id FROM orders\n),\nanti_join AS (\n  SELECT s.*\n  FROM signups s\n  LEFT JOIN orderers o ON s.customer_id = o.customer_id\n  WHERE o.customer_id IS NULL\n)\nSELECT\n  customer_id,\n  email,\n  region,\n  'Welcome back! 10% off your first order.' AS message\nFROM anti_join"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using LEFT JOIN without IS NULL filter",
+        "what_goes_wrong": "A plain LEFT JOIN returns *all* rows from the left table (including matched ones). The anti-join only works if you explicitly filter WHERE right.key IS NULL.",
+        "symptom": "Query returns all customers, not just those with no orders — same as SELECT * FROM customers.",
+        "bad_sql": "SELECT c.* FROM customers c LEFT JOIN orders o ON c.customer_id = o.customer_id",
+        "good_sql": "SELECT c.* FROM customers c LEFT JOIN orders o ON c.customer_id = o.customer_id WHERE o.order_id IS NULL",
+        "detection_sql": "SELECT COUNT(*) FROM customers c LEFT JOIN orders o ON c.customer_id = o.customer_id WHERE o.order_id IS NULL\n-- vs\nSELECT COUNT(*) FROM customers"
+      },
+      {
+        "mistake": "Confusing NOT EXISTS with NOT IN",
+        "what_goes_wrong": "NOT IN returns *unknown* (not TRUE/FALSE) if any value in the subquery is NULL — causing the entire clause to exclude all rows. NOT EXISTS handles NULLs correctly.",
+        "symptom": "NOT IN query returns 0 rows unexpectedly, even though missing customers exist. NOT EXISTS returns correct results.",
+        "bad_sql": "SELECT customer_id FROM customers WHERE customer_id NOT IN (SELECT customer_id FROM orders)",
+        "good_sql": "SELECT customer_id FROM customers WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = customers.customer_id)",
+        "detection_sql": "SELECT COUNT(*) FROM customers c WHERE c.customer_id NOT IN (SELECT customer_id FROM orders) -- may return 0 if any orders.customer_id IS NULL\nSELECT COUNT(*) FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id) -- correct"
+      },
+      {
+        "mistake": "Using EXCEPT on large tables without proper columns",
+        "what_goes_wrong": "EXCEPT compares *all* columns — if extra columns differ (e.g., loaded_at), rows may not match even if the key matches. Also, EXCEPT sorts the result, which is slow on large tables.",
+        "symptom": "EXCEPT returns many 'unmatched' rows due to extra columns, not missing keys.",
+        "bad_sql": "SELECT * FROM customers EXCEPT SELECT * FROM orders",
+        "good_sql": "SELECT c.customer_id FROM customers c\nEXCEPT\nSELECT o.customer_id FROM orders o",
+        "detection_sql": "SELECT COUNT(*) FROM customers c\nEXCEPT\nSELECT COUNT(DISTINCT customer_id) FROM orders"
+      },
+      {
+        "mistake": "Not checking NULL handling in join key",
+        "what_goes_wrong": "If customer_id is NULL in customers but NOT NULL in orders, LEFT JOIN with IS NULL won’t match — but NULL ≠ NULL, so NULLs *never* join. This may hide NULL issues.",
+        "symptom": "Customers with NULL customer_id appear as 'unmatched', but the real issue is NULL keys in the data.",
+        "bad_sql": "SELECT * FROM customers c LEFT JOIN orders o ON c.customer_id = o.customer_id WHERE o.order_id IS NULL",
+        "good_sql": "-- Normalize NULLs before anti-join:\nSELECT * FROM (\n  SELECT COALESCE(customer_id, 'UNKNOWN') AS customer_id FROM customers\n) c\nLEFT JOIN (\n  SELECT COALESCE(customer_id, 'UNKNOWN') AS customer_id FROM orders\n) o ON c.customer_id = o.customer_id\nWHERE o.customer_id IS NULL",
+        "detection_sql": "SELECT COUNT(*) FROM customers WHERE customer_id IS NULL"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "EXCEPT vs EXCEPT ALL in DuckDB",
+        "duckdb_behavior": "DuckDB’s EXCEPT defaults to EXCEPT DISTINCT (removes duplicates). EXCEPT ALL preserves duplicates — faster but may cause false 'unmatched' rows if duplicates exist.",
+        "postgres_behavior": "Same — EXCEPT is DISTINCT by default.",
+        "bigquery_behavior": "BigQuery supports EXCEPT DISTINCT (standard) and EXCEPT ALL.",
+        "safe_alternative": "Use EXCEPT DISTINCT unless duplicates are meaningful. For large tables, NOT EXISTS or LEFT JOIN IS NULL is often faster."
+      },
+      {
+        "construct": "Performance: LEFT JOIN IS NULL vs NOT EXISTS",
+        "duckdb_behavior": "DuckDB’s optimizer often rewrites both to the same plan — performance is similar. LEFT JOIN IS NULL may be faster if the child table is small.",
+        "postgres_behavior": "Same — both are typically optimized to anti-join.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Use NOT EXISTS for clarity (intent is obvious) or LEFT JOIN IS NULL if you need additional columns from the child table (e.g., to debug why it didn’t match)."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to *find unmatched records* (e.g., missing orders, orphaned items)",
+        "user’s question includes 'customers with no orders', 'find missing', 'orphaned'",
+        "data validation is needed (e.g., order_items without orders)",
+        "NULL handling is critical — NOT EXISTS is safest"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to *find matching records* (e.g., customers with orders)",
+          "use_instead": "join_semi",
+          "why": "Semi-joins (EXISTS, INNER JOIN) are optimized for presence checks"
+        },
+        {
+          "condition": "performance is critical and both tables are very large",
+          "use_instead": "agg_approx_distinct + EXCEPT",
+          "why": "For ultra-large tables, approximate distinct + set operations may be faster than anti-join"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "find missing", "no orders", "orphaned", "unmatched",
+        "anti-join", "LEFT JOIN NULL"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Both tables have NULL keys",
+        "what_happens": "LEFT JOIN IS NULL treats NULL ≠ NULL, so customers with NULL customer_id always appear as unmatched — even if orders also have NULL customer_id.",
+        "handling": "Replace NULL keys with a sentinel (e.g., 'UNKNOWN') before anti-join, or filter NULLs explicitly."
+      },
+      {
+        "scenario": "Child table is empty",
+        "what_happens": "All rows in parent table appear as unmatched (anti-join returns all parent rows). This is correct.",
+        "handling": "No issue — the query returns parent rows as expected."
+      },
+      {
+        "scenario": "Parent table is empty",
+        "what_happens": "Anti-join returns 0 rows — correct, as there are no parent rows to be unmatched.",
+        "handling": "No change needed."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log m) for hash join or O(n × m) for nested loop — depends on indexes and table sizes.",
+      "when_slow": "Both tables are very large (100M+ rows) without indexes. Anti-joins may require sorting or hashing.",
+      "optimization hint": "Index the join key on the child table. Pre-filter child table to relevant rows (e.g., WHERE order_date > ...) before anti-join. For small child tables, LEFT JOIN IS NULL is faster."
+    }
+  },
+  {
+    "id": "join_self",
+    "title": "Self Join for Row-to-Row Comparison",
+    "intent_tags": [
+      "self join", "join table to itself", "row comparison", "consecutive rows",
+      "parent-child", "manager-employee", "same-day transactions",
+      "compare rows", "join same table", "recursive comparison"
+    ],
+    "sql_features": ["join", "self_join", "inner_join", "left_join"],
+    "difficulty": "advanced",
+    "pattern_type": "relational",
+    "when_to_use": [
+      "user wants to compare *different rows* in the *same table* (e.g., previous event, next event, sibling records)",
+      "user’s question includes 'consecutive events', 'manager-employee', 'same-day orders'",
+      "computing time gaps between events (e.g., login1 to login2), or comparing rows within a group",
+      "building lag-like comparisons without window functions"
+    ],
+    "when_not_to_use": [
+      "user only needs previous/next *value* — use LAG/LEAD instead (simpler and more efficient)",
+      "the join creates a combinatorial explosion (e.g., 1M rows × 1M = 1T rows)",
+      "user wants *aggregated* comparisons (e.g., avg of siblings) — use window functions or CTEs instead"
+    ],
+    "related_patterns": [
+      "wf_lag_period_comparison", "wf_sliding_window", "wf_row_number_dedup",
+      "join_semi", "agg_preagg_before_join"
+    ],
+    "concept_explanation": {
+      "what_it_does": "A self-join joins a table to itself using different aliases (e.g., orders o1 JOIN orders o2). It’s used to compare rows — e.g., join each order to its preceding order for the same customer. It’s a row-to-row comparison without window functions.",
+      "mental_model": "Imagine two copies of the same spreadsheet side-by-side. You align row N in the first copy with row N-1 in the second copy to compute differences. A self-join creates that alignment."
+    },
+    "template": {
+      "minimal": "-- Customers with consecutive orders (self-join on order_date)\nSELECT\n  o1.customer_id,\n  o1.order_id AS order1,\n  o2.order_id AS order2,\n  DATEDIFF('day', o1.order_date, o2.order_date) AS days_between\nFROM orders o1\nJOIN orders o2 ON o1.customer_id = o2.customer_id\n  AND o1.order_date < o2.order_date\nWHERE DATEDIFF('day', o1.order_date, o2.order_date) = 1",
+      "realistic": "-- Find customers who ordered two days in a row (consecutive orders)\n-- Grain: one row per consecutive pair\nSELECT\n  o1.customer_id,\n  o1.order_id AS first_order_id,\n  o2.order_id AS second_order_id,\n  o1.order_date AS first_date,\n  o2.order_date AS second_date,\n  o2.order_date - o1.order_date AS days_apart\nFROM orders o1\nJOIN orders o2 ON o1.customer_id = o2.customer_id\n  AND o2.order_date = o1.order_date + INTERVAL '1 day'\nWHERE o1.order_date >= CURRENT_DATE - INTERVAL '30 days'\nORDER BY o1.customer_id, o1.order_date",
+      "composable": "-- Find first and last order per customer using self-join (older than window functions)\n-- Composes: join_self + agg_conditional\nWITH order_dates AS (\n  SELECT customer_id, order_id, order_date\n  FROM orders\n  WHERE order_date >= CURRENT_DATE - INTERVAL '60 days'\n),\nfirst_last AS (\n  SELECT\n    o1.customer_id,\n    o1.order_id AS first_order_id,\n    o1.order_date AS first_date,\n    o2.order_id AS last_order_id,\n    o2.order_date AS last_date\n  FROM order_dates o1\n  JOIN order_dates o2 ON o1.customer_id = o2.customer_id\n    AND o1.order_date = (SELECT MIN(order_date) FROM order_dates WHERE customer_id = o1.customer_id)\n    AND o2.order_date = (SELECT MAX(order_date) FROM order_dates WHERE customer_id = o2.customer_id)\n)\nSELECT\n  customer_id,\n  first_order_id,\n  last_order_id,\n  last_date - first_date AS span_days\nFROM first_last"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Missing join condition on key column (e.g., customer_id)",
+        "what_goes_wrong": "Without a key-based join, the self-join creates a *Cartesian product* — every row matches every other row. For 1,000 orders, this produces 1,000,000 rows.",
+        "symptom": "Query returns 1M+ rows for a 1K-row table — performance grinds to a halt.",
+        "bad_sql": "SELECT * FROM orders o1 JOIN orders o2 ON o1.order_date < o2.order_date",
+        "good_sql": "SELECT * FROM orders o1 JOIN orders o2 ON o1.customer_id = o2.customer_id AND o1.order_date < o2.order_date",
+        "detection_sql": "SELECT COUNT(*) FROM orders o1 JOIN orders o2 ON o1.order_date < o2.order_date -- may be 1000× larger than expected"
+      },
+      {
+        "mistake": "Creating a self-join when LAG/LEAD would be simpler",
+        "what_goes_wrong": "Self-joins are verbose and slow (especially for large tables). LAG/LEAD does the same comparison in one pass, without generating intermediate rows.",
+        "symptom": "Query runs slower than expected, and code is harder to maintain.",
+        "bad_sql": "SELECT o1.customer_id, o1.order_id, o2.order_id\nFROM orders o1\nJOIN orders o2 ON o1.customer_id = o2.customer_id\n  AND o1.order_date < o2.order_date\nWHERE o2.order_date = (SELECT MIN(order_date) FROM orders o3 WHERE o3.customer_id = o1.customer_id AND o3.order_date > o1.order_date)",
+        "good_sql": "SELECT customer_id, order_id,\n       LAG(order_id) OVER (PARTITION BY customer_id ORDER BY order_date) AS prev_order_id\nFROM orders",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT o1.customer_id, o1.order_id, o2.order_id\n  FROM orders o1\n  JOIN orders o2 ON o1.customer_id = o2.customer_id\n    AND o1.order_date < o2.order_date\n  WHERE o2.order_date = (SELECT MIN(order_date) FROM orders o3 WHERE o3.customer_id = o1.customer_id AND o3.order_date > o1.order_date)\n) t"
+      },
+      {
+        "mistake": "Joining on non-unique columns without deduplication",
+        "what_goes_wrong": "If the join key isn’t unique, multiple rows per key cause a *many-to-many* self-join, multiplying rows further (e.g., 10 orders on same date × 10 = 100 rows).",
+        "symptom": "Row count explodes unexpectedly — e.g., 10,000 orders → 1,000,000 rows.",
+        "bad_sql": "SELECT o1.*, o2.* FROM orders o1 JOIN orders o2 ON o1.order_date = o2.order_date",
+        "good_sql": "-- Add tiebreaker: join on date + order_id, or use ROW_NUMBER to dedupe first\nSELECT o1.*, o2.* FROM (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY order_date ORDER BY order_id) AS rn\n  FROM orders\n) o1\nJOIN (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY order_date ORDER BY order_id) AS rn\n  FROM orders\n) o2 ON o1.order_date = o2.order_date AND o1.rn = o2.rn",
+        "detection_sql": "SELECT order_date, COUNT(*) AS order_count FROM orders GROUP BY order_date HAVING COUNT(*) > 1"
+      },
+      {
+        "mistake": "Using self-join for consecutive-day comparison without date spine",
+        "what_goes_wrong": "Self-join finds *actual* consecutive days (e.g., Monday → Tuesday), but skips weekends. To find 'next business day', a date spine or calendar table is needed.",
+        "symptom": "Orders placed on Friday and Monday show as non-consecutive — days_apart = 3, not 1.",
+        "bad_sql": "SELECT o1.*, o2.*, o2.order_date - o1.order_date AS days_apart\nFROM orders o1\nJOIN orders o2 ON o1.customer_id = o2.customer_id AND o2.order_date = o1.order_date + INTERVAL '1 day'",
+        "good_sql": "-- Use generate_series to create a date spine, then LEFT JOIN to orders\nWITH dates AS (\n  SELECT generate_series(MIN(order_date), MAX(order_date), INTERVAL '1 day') AS order_date\n  FROM orders\n)\nSELECT * FROM dates d\nLEFT JOIN orders o ON d.order_date = o.order_date",
+        "detection_sql": "SELECT order_date, COUNT(*) FROM orders GROUP BY 1 HAVING COUNT(*) > 1"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "Self-join vs LAG in DuckDB",
+        "duckdb_behavior": "DuckDB’s optimizer may rewrite simple self-joins to LAG/LEAD, but complex self-joins (e.g., with subqueries) won’t be optimized.",
+        "postgres_behavior": "Postgres rarely optimizes self-joins to window functions — explicit LAG/LEAD is preferred.",
+        "bigquery_behavior": "Same — LAG/LEAD is faster and clearer.",
+        "safe_alternative": "Use LAG/LEAD unless you need *multiple* rows ahead/behind (e.g., previous + next). For most cases, window functions win on simplicity and speed."
+      },
+      {
+        "construct": "Self-join with large tables",
+        "duckdb_behavior": "DuckDB may materialize large intermediates for self-joins. For 10M rows, a self-join could create 100B row intermediates.",
+        "postgres_behavior": "Same — self-joins are risky on large tables.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Filter rows *before* self-join (e.g., WHERE date > '2024-01-01'). For comparisons, use window functions instead."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to compare rows *across* different rows in the same table (e.g., sibling records)",
+        "user needs more than one row ahead/behind (e.g., previous and next order)",
+        "user’s question includes 'compare consecutive orders', 'manager-employee'",
+        "window functions aren’t available or the engine doesn’t support them"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to compare to *immediately previous/next* row only",
+          "use_instead": "wf_lag_period_comparison",
+          "why": "LAG/LEAD is simpler, faster, and handles NULLs correctly"
+        },
+        {
+          "condition": "data is very large (>1M rows)",
+          "use_instead": "wf_sliding_window",
+          "why": "Self-joins scale poorly (O(n²)); window functions scale as O(n log n)"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "consecutive", "compare rows", "sibling records",
+        "previous next", "manager-employee", "self join"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Single row per key",
+        "what_happens": "Self-join produces no rows — no 'next' record exists.",
+        "handling": "No issue — empty result is correct. Use LEFT JOIN if you want to see the single row with NULLs for the 'next' record."
+      },
+      {
+        "scenario": "Duplicate join keys (e.g., two orders on same date)",
+        "what_happens": "Cartesian explosion — 2 orders on same date × 2 orders = 4 rows. Row count grows as squares.",
+        "handling": "Add a tiebreaker column to join on (e.g., order_id) or use ROW_NUMBER to dedupe first."
+      },
+      {
+        "scenario": "Join condition is too broad (e.g., same date without time)",
+        "what_happens": "Many rows match, causing explosion. For time-based gaps, use timestamp instead of date.",
+        "handling": "Use precise keys: order_date + time, or order_id, or a surrogate key."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n × m) — where n = rows in first alias, m = rows in second alias. Worst-case: O(n²).",
+      "when_slow": "Large tables (>100k rows) or non-unique join keys. Self-join on 1M rows = 1T row intermediates.",
+      "optimization hint": "Filter rows *before* self-join (e.g., WHERE date > '2024-01-01'). Use indexes on join keys. For most use cases, LAG/LEAD is 10× faster."
+    }
+  },
+  {
+    "id": "join_semi",
+    "title": "Semi Join for Existence Filtering",
+    "intent_tags": [
+      "EXISTS", "IN", "semi join", "existence check", "where matching exists",
+      "filter by existence", "matching rows", "IN vs EXISTS", "filter rows",
+      "exists filter", "semi join"
+    ],
+    "sql_features": ["semi_join", "exists", "in", "join", "inner_join"],
+    "difficulty": "beginner",
+    "pattern_type": "relational",
+    "when_to_use": [
+      "user wants to filter rows in table A *if* a matching row exists in table B (e.g., customers who have orders)",
+      "user’s question includes 'customers with orders', 'orders with items', 'filter by existence'",
+      "validating presence of related records without joining data",
+      "performance-critical filtering where anti-join is too slow"
+    ],
+    "when_not_to_use": [
+      "user wants to *exclude* rows with matches — use anti-join instead",
+      "user needs data *from* the matching rows — use inner join or left join",
+      "the IN clause contains NULLs — use EXISTS instead for correct NULL handling"
+    ],
+    "related_patterns": [
+      "join_anti", "agg_count", "agg_conditional",
+      "wf_row_number_dedup", "join_semi"
+    ],
+    "concept_explanation": {
+      "what_it_does": "A semi-join returns rows from table A that have *at least one* match in table B, but it doesn’t include columns from B. It’s written as WHERE EXISTS (SELECT 1 FROM B WHERE ...) or WHERE A.key IN (SELECT B.key FROM B). It filters by existence, not by joining data."
+    },
+    "template": {
+      "minimal": "-- Customers who have at least one order (using EXISTS)\nSELECT c.customer_id, c.email\nFROM customers c\nWHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id)",
+      "realistic": "-- Orders that have at least one item (filter out empty orders)\n-- Grain: one row per valid order\nSELECT\n  o.order_id,\n  o.order_date,\n  o.customer_id,\n  c.region\nFROM orders o\nJOIN customers c ON o.customer_id = c.customer_id\nWHERE EXISTS (\n  SELECT 1 FROM order_items oi WHERE oi.order_id = o.order_id\n)\nAND o.order_date >= CURRENT_DATE - INTERVAL '30 days'\nORDER BY o.order_date DESC",
+      "composable": "-- Find customers who have orders *and* have placed at least 3 orders\n-- Composes: join_semi + agg_count\nWITH customer_orders AS (\n  SELECT customer_id, COUNT(*) AS order_count\n  FROM orders\n  GROUP BY customer_id\n  HAVING COUNT(*) >= 3\n)\nSELECT\n  c.customer_id,\n  c.email,\n  c.signup_date\nFROM customers c\nWHERE c.customer_id IN (SELECT customer_id FROM customer_orders)\nORDER BY c.signup_date DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using IN with a subquery that returns NULL",
+        "what_goes_wrong": "If any value in the IN subquery is NULL, the entire IN clause returns UNKNOWN (not TRUE/FALSE), causing *all* rows to be excluded — even if non-NULL matches exist.",
+        "symptom": "Query returns 0 rows unexpectedly — e.g., customers with orders vanish if orders.customer_id has NULLs.",
+        "bad_sql": "SELECT * FROM customers WHERE customer_id IN (SELECT customer_id FROM orders)",
+        "good_sql": "SELECT * FROM customers WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = customers.customer_id)",
+        "detection_sql": "SELECT COUNT(*) FROM orders WHERE customer_id IS NULL"
+      },
+      {
+        "mistake": "Using semi-join when data from B is needed",
+        "what_goes_wrong": "Semi-joins only filter — they don’t include columns from B. If the user needs, e.g., order_date, a semi-join won’t provide it.",
+        "symptom": "User writes semi-join but can’t access order_date — has to re-join.",
+        "bad_sql": "SELECT c.customer_id FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id)",
+        "good_sql": "SELECT c.customer_id, MAX(o.order_date) AS last_order_date\nFROM customers c\nJOIN orders o ON c.customer_id = o.customer_id\nGROUP BY c.customer_id",
+        "detection_sql": "SELECT c.customer_id, COUNT(*)\nFROM customers c\nWHERE c.customer_id IN (SELECT customer_id FROM orders)\nGROUP BY c.customer_id"
+      },
+      {
+        "mistake": "Using semi-join instead of anti-join when excluding",
+        "what_goes_wrong": "Semi-joins *include* matching rows; anti-joins *exclude* them. Confusing the two inverts the result.",
+        "symptom": "User wants customers *without* orders but gets customers *with* orders.",
+        "bad_sql": "SELECT * FROM customers WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = customers.customer_id)",
+        "good_sql": "SELECT * FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id)",
+        "detection_sql": "SELECT COUNT(*) FROM customers WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = customers.customer_id) -- should be small for no-orders"
+      },
+      {
+        "mistake": "Using IN with uncorrelated subquery",
+        "what_goes_wrong": "If the subquery doesn’t reference the outer table (e.g., IN (SELECT 1)), it returns a constant — either all rows match or none do.",
+        "symptom": "Query returns *all* or *no* rows, depending on the constant.",
+        "bad_sql": "SELECT * FROM customers WHERE customer_id IN (SELECT 1)", 
+        "good_sql": "SELECT * FROM customers WHERE customer_id IN (SELECT customer_id FROM orders)",
+        "detection_sql": "SELECT * FROM customers WHERE customer_id IN (SELECT 1) -- will return all rows"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "EXISTS vs IN performance",
+        "duckdb_behavior": "DuckDB often rewrites EXISTS and IN to the same plan. For small tables, IN is faster; for large tables, EXISTS may be safer.",
+        "postgres_behavior": "Postgres prefers EXISTS for large tables — it short-circuits after finding one match.",
+        "bigquery_behavior": "BigQuery optimizes both well — use EXISTS for clarity and NULL safety.",
+        "safe_alternative": "Use EXISTS unless the IN list is small and known (e.g., IN (1,2,3)). For subqueries, EXISTS is safer and often faster."
+      },
+      {
+        "construct": "Semi-join with NULLs in join key",
+        "duckdb_behavior": "EXISTS treats NULL ≠ NULL, so rows with NULL keys won’t match. This may hide NULL issues.",
+        "postgres_behavior": "Same — NULLs don’t match in joins or EXISTS.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Normalize NULLs before semi-join: COALESCE(column, 'UNKNOWN') or filter NULLs explicitly."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to *filter rows* based on *existence* of matches (not to join data)",
+        "user’s question includes 'customers with orders', 'orders with items'",
+        "performance matters — semi-joins are faster than joins for filtering",
+        "NULL safety is critical — EXISTS avoids IN’s NULL trap"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to *exclude* rows with matches (anti-join)",
+          "use_instead": "join_anti",
+          "why": "Anti-joins use LEFT JOIN IS NULL or NOT EXISTS to find missing matches"
+        },
+        {
+          "condition": "user needs data *from* the matching rows (e.g., order_date)",
+          "use_instead": "join_inner",
+          "why": "Inner joins return columns from both tables"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "customers with orders", "filter by existence", "where matching",
+        "semi join", "IN vs EXISTS"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Matching table is empty",
+        "what_happens": "Semi-join returns 0 rows — no matches exist.",
+        "handling": "No issue — result is correct. Use anti-join if you want all parent rows."
+      },
+      {
+        "scenario": "Parent table has NULL keys",
+        "what_happens": "NULL ≠ NULL in EXISTS, so NULL keys never match — they are excluded (not included).",
+        "handling": "Replace NULL keys with sentinels before semi-join, or filter NULLs first."
+      },
+      {
+        "scenario": "Matching table has duplicates",
+        "what_happens": "Semi-join returns rows from parent *once*, even if 1000 matches exist — EXISTS short-circuits after first match.",
+        "handling": "No issue — semi-joins handle duplicates correctly by definition."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n × m) worst-case, but often optimized to O(n log m) with indexes or O(n) with hash joins.",
+      "when_slow": "Large parent and matching tables without indexes. IN with very long lists may be slow.",
+      "optimization hint": "Index the join key on the matching table. Use EXISTS instead of IN for subqueries. For very large matching tables, pre-aggregate to distinct keys."
+    }
+  },
+  {
+    "id": "join_column_qualified",
+    "title": "Column Qualification in Multi-Table Queries",
+    "intent_tags": [
+      "ambiguous column", "column prefix", "table alias", "qualified column",
+      " qualify column", "avoid ambiguity", "alias prefix", "join column",
+      "multi-table column", "alias column"
+    ],
+    "sql_features": ["join", "inner_join", "left_join", "alias"],
+    "difficulty": "beginner",
+    "pattern_type": "correctness",
+    "when_to_use": [
+      "user’s query fails with 'column is ambiguous' error",
+      "user’s query returns wrong results silently (e.g., JOIN without column prefix)",
+      "user’s question includes 'how do I prefix columns?', 'resolve ambiguity'",
+      "any query with multiple tables (JOINs, subqueries) — always qualify columns"
+    ],
+    "when_not_to_use": [
+      "user’s query uses only one table — no ambiguity possible",
+      "user’s query is in a CTE where column names are unique — but still consider qualifying for readability"
+    ],
+    "related_patterns": [
+      "join_fanout_detection", "join_semi", "join_anti",
+      "join_self", "agg_preagg_before_join"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Qualifying columns means prefixing them with table names or aliases (e.g., o.order_id, c.region) to avoid ambiguity when multiple tables have the same column name. It prevents 'column is ambiguous' errors and silent logic errors from incorrect matches.",
+      "mental_model": "Imagine two lists of names — 'customers' and 'orders'. Both have 'id'. Writing 'id' is confusing; writing 'customer.id' vs 'order.id' resolves it. Always prefix in multi-table queries."
+    },
+    "template": {
+      "minimal": "-- Customer and order tables both have 'id' — qualify with aliases\nSELECT\n  c.customer_id,\n  o.order_id,\n  c.region\nFROM customers c\nJOIN orders o ON c.customer_id = o.customer_id",
+      "realistic": "-- Avoid column ambiguity in a complex join with three tables\n-- All columns are prefixed with table aliases\nWITH order_revenue AS (\n  SELECT\n    oi.order_id,\n    SUM(oi.quantity * oi.unit_price) AS order_total\n  FROM order_items oi\n  GROUP BY oi.order_id\n)\nSELECT\n  c.customer_id,\n  c.email,\n  o.order_id,\n  o.order_date,\n  p.product_name,\n  COALESCE(r.order_total, 0) AS order_total,\n  c.region\nFROM customers c\nJOIN orders o ON c.customer_id = o.customer_id\nJOIN order_revenue r ON o.order_id = r.order_id\nJOIN order_items oi ON r.order_id = oi.order_id\nJOIN products p ON oi.product_id = p.product_id\nWHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'",
+      "composable": "-- Complex join with qualified columns, then filter on a derived metric\n-- Composes: join_column_qualified + agg_having_vs_where\nWITH order_items_summary AS (\n  SELECT\n    oi.order_id,\n    COUNT(*) AS item_count,\n    SUM(oi.quantity) AS total_items\n  FROM order_items oi\n  GROUP BY oi.order_id\n)\nSELECT\n  c.customer_id,\n  c.email,\n  o.order_id,\n  o.order_date,\n  oi_summary.item_count\nFROM customers c\nJOIN orders o ON c.customer_id = o.customer_id\nJOIN order_items_summary oi_summary ON o.order_id = oi_summary.order_id\nWHERE c.region = 'North'\nHAVING oi_summary.item_count > 2", 
+      "composable_duckdb": "-- DuckDB alternative: qualify and use subquery for HAVING\nWITH order_items_summary AS (\n  SELECT\n    oi.order_id,\n    COUNT(*) AS item_count\n  FROM order_items oi\n  GROUP BY oi.order_id\n),\nqualified AS (\n  SELECT\n    c.customer_id,\n    c.email,\n    o.order_id,\n    o.order_date,\n    oi_summary.item_count\n  FROM customers c\n  JOIN orders o ON c.customer_id = o.customer_id\n  JOIN order_items_summary oi_summary ON o.order_id = oi_summary.order_id\n  WHERE c.region = 'North'\n)\nSELECT * FROM qualified WHERE item_count > 2"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Omitting column qualification in JOIN or WHERE clause",
+        "what_goes_wrong": "If two tables have 'order_id', the engine can’t tell which one you mean. DuckDB/Postgres error: 'column order_id is ambiguous'. BigQuery may silently pick the first — causing wrong joins.",
+        "symptom": "Query fails with 'ambiguous column' error, or returns wrong rows if engine guesses incorrectly.",
+        "bad_sql": "SELECT * FROM customers c JOIN orders o ON customer_id = customer_id",
+        "good_sql": "SELECT * FROM customers c JOIN orders o ON c.customer_id = o.customer_id",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT * FROM customers c JOIN orders o ON customer_id = customer_id\n) LIMIT 1"
+      },
+      {
+        "mistake": "Using unqualified column in SELECT with aliases",
+        "what_goes_wrong": "If SELECT has unqualified columns, the engine may pick the wrong table’s column — silently returning wrong data.",
+        "symptom": "Results look plausible but are wrong — e.g., revenue = order_id (numeric) instead of sum(revenue).",
+        "bad_sql": "SELECT customer_id, order_id, revenue\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id", 
+        "good_sql": "SELECT o.customer_id, o.order_id, SUM(oi.quantity * oi.unit_price) AS revenue\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id\nGROUP BY o.customer_id, o.order_id",
+        "detection_sql": "SELECT * FROM (\n  SELECT customer_id, order_id, revenue FROM orders o JOIN order_items oi ON o.order_id = oi.order_id\n) LIMIT 1"
+      },
+      {
+        "mistake": "Qualifying with wrong table name",
+        "what_goes_wrong": "Prefixing 'o.customer_id' when the alias is 'c' causes 'o.customer_id does not exist' — engine can’t find alias o.",
+        "symptom": "Query fails with 'unknown alias' or 'column does not exist'.",
+        "bad_sql": "SELECT o.customer_id FROM customers c JOIN orders o ON c.customer_id = o.customer_id",
+        "good_sql": "SELECT c.customer_id FROM customers c JOIN orders o ON c.customer_id = o.customer_id",
+        "detection_sql": "SELECT * FROM (\n  SELECT o.customer_id FROM customers c JOIN orders o ON c.customer_id = o.customer_id\n) LIMIT 1"
+      },
+      {
+        "mistake": "Qualifying in GROUP BY without matching SELECT alias",
+        "what_goes_wrong": "If SELECT has aliased columns (e.g., revenue), GROUP BY must use the *alias* or the *expression*, not the unqualified column.",
+        "symptom": "Query fails with 'column ... must appear in GROUP BY' — unqualified column doesn’t match the alias.",
+        "bad_sql": "SELECT c.region, SUM(oi.quantity * oi.unit_price) AS revenue\nFROM orders o JOIN order_items oi ON o.order_id = oi.order_id\nJOIN customers c ON o.customer_id = c.customer_id\nGROUP BY region",
+        "good_sql": "SELECT c.region, SUM(oi.quantity * oi.unit_price) AS revenue\nFROM orders o JOIN order_items oi ON o.order_id = oi.order_id\nJOIN customers c ON o.customer_id = c.customer_id\nGROUP BY c.region",
+        "detection_sql": "SELECT region, COUNT(*) FROM (\n  SELECT c.region, SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM orders o JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  GROUP BY region\n) GROUP BY region"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "DuckDB vs Postgres qualified column handling",
+        "duckdb_behavior": "DuckDB errors on unqualified ambiguous columns. It requires explicit qualification or aliases in all multi-table queries.",
+        "postgres_behavior": "Same — strict about ambiguous columns.",
+        "bigquery_behavior": "BigQuery is more forgiving — it may auto-qualify, but this can mask bugs.",
+        "safe_alternative": "Always use table aliases and prefix all columns in multi-table queries — even if not strictly required, it prevents bugs."
+      },
+      {
+        "construct": "Alias shadowing in nested queries",
+        "duckdb_behavior": "Aliases in subqueries can shadow outer aliases — e.g., 'c' in subquery hides 'c' from outer query.",
+        "postgres_behavior": "Same — nested alias shadowing is possible.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Use unique, descriptive aliases (e.g., 'customers c', 'order_items oi'). Avoid generic aliases like 't1', 't2'."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user’s query has multiple tables and column names overlap (e.g., id, name, date)",
+        "user’s question includes 'how do I fix ambiguous column?', 'qualify columns'",
+        "any query with JOIN, CTE, or subquery — always qualify to prevent bugs"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user’s query has only one table",
+          "use_instead": "unqualified",
+          "why": "No ambiguity possible — qualification is optional (but still recommended for consistency)"
+        },
+        {
+          "condition": "user wants to avoid alias clutter in small queries",
+          "use_instead": "unqualified",
+          "why": "Single-table queries are safe — qualification adds noise"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "ambiguous column", "qualify column", "alias column",
+        "fix column prefix", "join column"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "CTE with same column name as outer table",
+        "what_happens": "CTE alias can shadow table alias — e.g., 'c' in CTE hides 'c' from outer query. Column qualification becomes ambiguous again.",
+        "handling": "Use unique aliases for CTEs and outer tables. Or fully qualify in outer query: outer_table.column."
+      },
+      {
+        "scenario": "Alias conflicts with reserved words",
+        "what_happens": "Using 'order' as alias without quoting causes syntax error — 'order' is a reserved keyword.",
+        "handling": "Quote aliases: \"order\" or use descriptive names (e.g., 'orders o')."
+      },
+      {
+        "scenario": "Self-join with multiple aliases",
+        "what_happens": "Easy to mix up o1, o2 — qualification prevents errors.",
+        "handling": "Use clear, distinct aliases: 'o1', 'o2' or 'order_a', 'order_b'."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "No performance impact — qualification is purely syntactic. The optimizer ignores it.",
+      "when_slow": "Never — qualification doesn’t affect speed. It’s a code quality issue, not a performance one.",
+      "optimization hint": "Always qualify columns in multi-table queries — it’s a best practice that prevents silent bugs. Use short, consistent aliases for readability."
+    }
+  }
+]

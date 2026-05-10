@@ -1,0 +1,816 @@
+[
+  {
+    "id": "dq_grain_assertion",
+    "title": "Grain Assertion Before Aggregation",
+    "intent_tags": [
+      "one row per key",
+      "duplicate detection before group by",
+      "check grain",
+      "row count assertion",
+      "COUNT(*) vs COUNT(DISTINCT)",
+      "silent duplication",
+      "data grain check",
+      "aggregation safety",
+      "ensure one-to-one join",
+      "validate key uniqueness",
+      "prevent inflation",
+      "GROUP BY integrity",
+      "grain assertion",
+      "data quality gate",
+      "no duplicates expected"
+    ],
+    "sql_features": [
+      "count",
+      "count_over",
+      "group_by",
+      "having",
+      "distinct",
+      "join",
+      "cte",
+      "case_when"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "correctness",
+    "when_to_use": [
+      "user wants to GROUP BY a composite key but fears duplicated rows inflating aggregates",
+      "after a JOIN, verifying that no row multiplication occurred (fan-out detection)",
+      "before computing totals per customer/order/product to catch silent duplication",
+      "building alerts that surface unexpected duplicates in critical dimensions",
+      "validating that a business key (e.g., order_id, user_id) is truly unique before aggregation",
+      "auditing ETL pipeline output for grain violations"
+    ],
+    "when_not_to_use": [
+      "when the grain is intentionally many-to-one and duplicates are expected (e.g., order_items per order) — use grain assertion only for dimension tables",
+      "when the table is known to have duplicates but the aggregation handles them (e.g., using SUM instead of COUNT) — assertion adds unnecessary overhead",
+      "for high-cardinality keys where duplicates are rare and expensive to check at scale — consider spot-checks instead",
+      "when counting distinct values (e.g., unique users) — the grain is already implicit; use APPROX_COUNT_DISTINCT instead",
+      "when validating foreign key integrity — use dq_referential_integrity instead",
+      "for time-sensitive alerts where speed trumps completeness — use sampling or approximate dedup checks"
+    ],
+    "related_patterns": [
+      "dq_referential_integrity",
+      "dq_idempotent_dedup",
+      "dq_row_count_assertion",
+      "join_fanout_detection",
+      "agg_group_by_having"
+    ],
+    "concept_explanation": {
+      "what_it_does": "A grain assertion verifies that a key or set of keys identifies exactly one row — by comparing COUNT(*) to COUNT(DISTINCT key) — before using the data in an aggregation. It catches silent duplication that would cause aggregates like SUM or COUNT to be inflated.",
+      "mental_model": "Imagine checking that each SKU in your product table appears only once. If COUNT(*) > COUNT(DISTINCT sku), then multiple rows share the same SKU, meaning your 'per-SKU' aggregation will be wrong. This is a data quality gate before analysis.",
+      "key_behavior": "The assertion only catches *within-table* duplication. If duplication arises from a JOIN, it will not be detected here — use dq_row_count_assertion or join_fanout_detection instead."
+    },
+    "template": {
+      "minimal": "SELECT COUNT(*) AS row_count, COUNT(DISTINCT sku) AS distinct_sku FROM products;\nSELECT CASE WHEN COUNT(*) = COUNT(DISTINCT sku) THEN 'OK' ELSE 'GRAIN VIOLATION' END AS grain_status FROM products;",
+      "realistic": "-- Verify that order_id is unique in the orders table before joining to order_items\nWITH grain_check AS (\n  SELECT\n    COUNT(*) AS total_rows,\n    COUNT(DISTINCT order_id) AS unique_orders,\n    COUNT(*) - COUNT(DISTINCT order_id) AS duplicate_count\n  FROM orders\n)\nSELECT\n  total_rows,\n  unique_orders,\n  duplicate_count,\n  CASE\n    WHEN duplicate_count = 0 THEN 'PASS: grain is correct'\n    ELSE 'FAIL: ' || duplicate_count || ' duplicate order_ids found'\n  END AS grain_status\nFROM grain_check;",
+      "composable": "-- Grain check + safe join (combines dq_grain_assertion + dq_safe_division for downstream metrics)\n-- Composes: dq_grain_assertion + dq_safe_division\nWITH order_grain AS (\n  SELECT\n    COUNT(*) AS total_orders,\n    COUNT(DISTINCT order_id) AS unique_orders\n  FROM orders\n),\norders_unique AS (\n  SELECT * FROM orders\n  WHERE order_id IN (SELECT order_id FROM order_grain WHERE total_orders = unique_orders)\n),\norder_totals AS (\n  SELECT\n    o.order_id,\n    COUNT(oi.id) AS item_count,\n    SUM(oi.amount) AS order_amount\n  FROM orders_unique o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  GROUP BY 1\n)\nSELECT\n  order_id,\n  item_count,\n  order_amount,\n  ROUND(order_amount / NULLIF(item_count, 0), 2) AS avg_item_price\nFROM order_totals\nWHERE item_count > 0"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using COUNT(DISTINCT key) alone without row count comparison",
+        "what_goes_wrong": "COUNT(DISTINCT) masks the duplication — it returns the correct number of unique keys but hides that duplicates exist. Aggregations on the table will still be wrong because SUM() and COUNT() act on all rows, not just distinct keys.",
+        "symptom": "Aggregation results (e.g., total revenue) are unexpectedly high; comparing against source systems shows mismatches only after joins.",
+        "bad_sql": "SELECT COUNT(DISTINCT order_id) AS unique_orders FROM orders;",  
+        "good_sql": "SELECT COUNT(*) AS total, COUNT(DISTINCT order_id) AS unique, COUNT(*) - COUNT(DISTINCT order_id) AS dupes FROM orders WHERE dupes > 0;",
+        "detection_sql": "SELECT COUNT(*) - COUNT(DISTINCT order_id) AS duplicate_rows FROM orders;"
+      },
+      {
+        "mistake": "Not checking grain *after* ETL transformations",
+        "what_goes_wrong": "A table may be grain-perfect in the source, but transformations (e.g., unpivoting, deduping with wrong key) can break the grain. Without rechecking after transformation, the error propagates silently.",
+        "symptom": "Reports are correct for raw tables but wrong for processed views or CTEs.",
+        "bad_sql": "WITH orders_dedup AS (SELECT DISTINCT * FROM orders) SELECT COUNT(*) FROM orders_dedup;",  
+        "good_sql": "WITH orders_dedup AS (\n  SELECT order_id, MAX(created_at) AS created_at, COUNT(*) AS dupe_count\n  FROM orders\n  GROUP BY 1\n  HAVING COUNT(*) > 1\n)\nSELECT COUNT(*) AS problem_rows FROM orders_dedup;",
+        "detection_sql": "-- Check grain on transformed table: e.g., after deduping\nSELECT COUNT(*) AS transformed_rows, COUNT(DISTINCT order_id) AS unique_ids\nFROM orders_dedup WHERE dupe_count IS NOT NULL;"
+      },
+      {
+        "mistake": "Checking grain on only part of a composite key",
+        "what_goes_wrong": "The grain may be defined by (customer_id, month), but checking only customer_id returns 'OK' even though multiple months per customer create duplicate rows at the customer grain.",
+        "symptom": "Monthly aggregations per customer show duplicated revenue, but per-customer-only check passed.",
+        "bad_sql": "SELECT COUNT(*) = COUNT(DISTINCT customer_id) AS ok FROM monthly_revenue;",  
+        "good_sql": "SELECT COUNT(*) = COUNT(DISTINCT customer_id || '_' || month) AS ok FROM monthly_revenue;",
+        "detection_sql": "SELECT customer_id, month, COUNT(*) AS row_count FROM monthly_revenue GROUP BY 1,2 HAVING COUNT(*) > 1;"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "COUNT(DISTINCT) behavior with NULLs",
+        "duckdb_behavior": "COUNT(DISTINCT key) ignores NULLs — if key has NULLs, they’re excluded from both numerator and denominator, making duplication checks deceptive.",
+        "postgres_behavior": "Same: NULLs are excluded from COUNT(DISTINCT).",
+        "bigquery_behavior": "Same behavior. However, BigQuery COUNT(DISTINCT) is approximate by default for large cardinals unless ROUNDING_MODE=EXACT.",
+        "safe_alternative": "Before assertion, explicitly filter or handle NULLs: COUNT(DISTINCT COALESCE(key, 'NULL_SENTINEL')) to avoid silent exclusions."
+      },
+      {
+        "construct": "Composite key concatenation for uniqueness",
+        "duckdb_behavior": "string concatenation (e.g., col1 || '_' || col2) works, but special characters in data can cause collisions (e.g., 'a_b_c' vs 'a_b' + '_c').",
+        "postgres_behavior": "Same concatenation behavior.",
+        "bigquery_behavior": "Supports CONCAT(col1, col2, ...) or ||, but same collision risk.",
+        "safe_alternative": "Use struct-like comparison: COUNT(DISTINCT STRUCT(col1, col2)) in BigQuery, or use a hash: COUNT(DISTINCT MD5(CAST(row AS TEXT))) in DuckDB/Postgres for safety."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to ensure a dimension table has no duplicate primary keys before analysis",
+        "building automated data quality tests for ETL pipelines",
+        "validating JOIN inputs to prevent row multiplication",
+        "auditing new database columns or changes to uniqueness constraints",
+        "spot-checking before high-stakes reporting (e.g., quarterly revenue)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user suspects fan-out from JOIN, not within-table duplication",
+          "use_instead": "dq_row_count_assertion",
+          "why": "This pattern checks table-level uniqueness; dq_row_count_assertion compares row counts before/after JOIN"
+        },
+        {
+          "condition": "user needs to deduplicate data, not just detect issues",
+          "use_instead": "dq_idempotent_dedup",
+          "why": "Assertion identifies the problem; idempotent_dedup resolves it deterministically"
+        },
+        {
+          "condition": "user is verifying foreign key integrity (e.g., 'every order_id in order_items exists in orders')",
+          "use_instead": "dq_referential_integrity",
+          "why": "Grain checks validate internal consistency, not cross-table reference validity"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "is this key unique?",
+        "one row per order",
+        "any duplicates here?",
+        "can I GROUP BY this safely?",
+        "is my dimension table clean?",
+        "ensure grain before sum"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "NULLs in key columns (e.g., optional foreign key)",
+        "what_happens": "COUNT(DISTINCT) ignores NULLs, so duplicates with NULLs are not counted — grain appears valid even if non-NULL duplicates exist.",
+        "handling": "Filter out NULLs before assertion or treat them explicitly: COUNT(DISTINCT COALESCE(key, '__NULL__')) > 0."
+      },
+      {
+        "scenario": "Natural keys with high entropy (e.g., UUIDs)",
+        "what_happens": "COUNT(DISTINCT) and COUNT(*) are nearly identical even with duplicates — the difference is negligible, making assertions less informative.",
+        "handling": "For UUIDs, use a hash of other attributes (e.g., MD5(data_columns)) to detect logical duplicates rather than relying on ID."
+      },
+      {
+        "scenario": "Temporal tables with versioned rows (e.g., effective dates)",
+        "what_happens": "The primary key (e.g., user_id) is duplicated across versions — but this is expected and correct. Grain assertion fails incorrectly.",
+        "handling": "Check grain only on (key, version_column) or use valid_from/valid_to ranges to define effective grain."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) for scan + O(n log n) for DISTINCT sort",
+      "when_slow": "High-cardinality keys (>100M rows, >10M distinct) cause excessive disk spilling. Slower when table is large and unindexed.",
+      "optimization_hint": "Pre-filter to relevant date range or status before assertion. For large tables, use approximate COUNT(DISTINCT) (e.g., APPROX_COUNT_DISTINCT in BigQuery) — trade some accuracy for speed. In DuckDB, add indexes on the key column."
+    }
+  },
+  {
+    "id": "dq_safe_division",
+    "title": "Safe Division",
+    "intent_tags": [
+      "division by zero",
+      "prevent divide by zero",
+      "NULLIF",
+      "division safety",
+      "COALESCE division",
+      "zero denominator",
+      "division guard",
+      "safe ratio",
+      "division protection",
+      "avoid infinity",
+      "NaN prevention",
+      "division edge case",
+      "div by zero fix",
+      "conditional denominator",
+      "ratio calculation"
+    ],
+    "sql_features": [
+      "nullif",
+      "coalesce",
+      "case_when",
+      "conditional_aggregation",
+      "sum",
+      "avg",
+      "count",
+      "join",
+      "cte"
+    ],
+    "difficulty": "beginner",
+    "pattern_type": "correctness",
+    "when_to_use": [
+      "user needs to compute a ratio or percentage where denominator may be zero or NULL",
+      "calculating averages, rates, or percentages across user segments or time periods",
+      "aggregating metrics where group size might be zero (e.g., conversions with no impressions)",
+      "avoiding NaN or Infinity in downstream BI tools or ML models",
+      "dividing two aggregations that come from different sources (e.g., sales / target)"
+    ],
+    "when_not_to_use": [
+      "when denominator is guaranteed non-zero (e.g., row count in a table with >0 rows) — NULLIF adds unnecessary complexity",
+      "when zero should be treated as an error condition and the query should fail — use explicit validation instead",
+      "in JOINs where denominator is from a right table with no matching rows — consider using LEFT JOIN + COALESCE or excluding with WHERE instead",
+      "when computing a log or other non-linear transform — division is just the first step; use NULLIF inside the transform instead",
+      "for boolean flags or existence checks — division is overkill; use EXISTS or COUNT(*) > 0 instead"
+    ],
+    "related_patterns": [
+      "dq_null_safe_comparison",
+      "dq_grain_assertion",
+      "seg_case_when_classification",
+      "stat_percentile_distribution",
+      "agg_conditional_aggregation"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Safe division prevents division-by-zero errors and propagating NULLs by wrapping the denominator in NULLIF(..., 0) or handling NULL with COALESCE. This ensures the query returns a defined numeric result (e.g., 0 or NULL) instead of crashing or producing NaN.",
+      "mental_model": "Divide by zero is like asking 'how many apples per zero people?' — it's undefined. NULLIF(denominator, 0) converts zero to NULL, and dividing any number by NULL yields NULL — a safe, intentional result. COALESCE lets you replace NULL with 0 or a default if needed.",
+      "key_behavior": "NULLIF(denominator, 0) only catches zeros — it does not catch NULLs in the denominator. Use COALESCE(denominator, 0) or NULLIF(COALESCE(denominator, 0), 0) for full coverage."
+    },
+    "template": {
+      "minimal": "SELECT numerator / NULLIF(denominator, 0) AS safe_ratio FROM metrics;\n-- To handle NULL in numerator too:\nSELECT COALESCE(numerator, 0) / NULLIF(COALESCE(denominator, 0), 0) AS safe_ratio FROM metrics;",
+      "realistic": "-- Conversion rate per campaign with safe denominator handling\nSELECT\n  campaign_id,\n  COUNT(DISTINCT user_id) AS impressions,\n  COUNT(DISTINCT CASE WHEN conversion = 1 THEN user_id END) AS conversions,\n  ROUND(\n    COUNT(DISTINCT CASE WHEN conversion = 1 THEN user_id END)\n    / NULLIF(COUNT(DISTINCT user_id), 0) * 100,\n  2) AS conversion_rate\nFROM campaigns\nGROUP BY 1\nORDER BY conversion_rate DESC NULLS LAST;",
+      "composable": "-- Safe division inside a CASE WHEN classification (combines dq_safe_division + seg_case_when_classification)\n-- Composes: dq_safe_division + seg_case_when_classification\nWITH campaign_metrics AS (\n  SELECT\n    campaign_id,\n    COUNT(DISTINCT user_id) AS impressions,\n    COUNT(DISTINCT CASE WHEN conversion = 1 THEN user_id END) AS conversions,\n    SUM(CASE WHEN conversion = 1 THEN revenue ELSE 0 END) AS revenue\n  FROM campaigns\n  GROUP BY 1\n),\nwith_rate AS (\n  SELECT\n    campaign_id,\n    impressions,\n    conversions,\n    revenue,\n    revenue / NULLIF(impressions, 0) AS revenue_per_impression\n  FROM campaign_metrics\n)\nSELECT\n  campaign_id,\n  impressions,\n  conversions,\n  revenue_per_impression,\n  CASE\n    WHEN impressions = 0 THEN 'no_data'\n    WHEN revenue_per_impression > 0.5 THEN 'high_value'\n    WHEN revenue_per_impression > 0.1 THEN 'medium_value'\n    ELSE 'low_value'\n  END AS campaign_tier\nFROM with_rate\nORDER BY revenue_per_impression DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using NULLIF only on denominator but not handling NULL in numerator",
+        "what_goes_wrong": "If numerator is NULL (e.g., no conversions), the division becomes NULL / 0 → NULL (safe), but if denominator is also NULL, NULL / NULL → NULL — ambiguous. More critically, NULL in numerator causes entire expression to be NULL, hiding potential zeros.",
+        "symptom": "Conversion rate shows NULL instead of 0% for campaigns with zero conversions, confusing business users who expect '0%' for inactive campaigns.",
+        "bad_sql": "SELECT conversions / NULLIF(impressions, 0) AS rate FROM campaign_summary;",  
+        "good_sql": "SELECT COALESCE(conversions, 0) / NULLIF(impressions, 0) AS rate FROM campaign_summary;",
+        "detection_sql": "SELECT COUNT(*) FROM campaign_summary WHERE conversions IS NULL;"
+      },
+      {
+        "mistake": "Using COALESCE on numerator but not denominator in division",
+        "what_goes_wrong": "If denominator is 0, division crashes. COALESCE(numerator, 0) doesn’t protect against denominator = 0.",
+        "symptom": "Query fails with 'division by zero' error at runtime.",
+        "bad_sql": "SELECT COALESCE(conversions, 0) / impressions AS rate FROM campaign_summary;",  
+        "good_sql": "SELECT COALESCE(conversions, 0) / NULLIF(impressions, 0) AS rate FROM campaign_summary;",
+        "detection_sql": "SELECT COUNT(*) FROM campaign_summary WHERE impressions = 0;"
+      },
+      {
+        "mistake": "Confusing NULLIF vs COALESCE roles — using COALESCE on denominator only",
+        "what_goes_wrong": "COALESCE(denominator, 0) turns NULL to 0, but 0 in the denominator still triggers division by zero. NULLIF must wrap the zero-converted denominator.",
+        "symptom": "Query throws 'division by zero' when denominator is NULL, despite COALESCE.",
+        "bad_sql": "SELECT numerator / COALESCE(denominator, 0) AS rate FROM data;",  
+        "good_sql": "SELECT numerator / NULLIF(COALESCE(denominator, 0), 0) AS rate FROM data;",
+        "detection_sql": "SELECT COUNT(*) FROM data WHERE denominator IS NULL OR denominator = 0;"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "NULLIF with multiple arguments",
+        "duckdb_behavior": "NULLIF(denom, 0) works exactly as expected — returns NULL if denom = 0, otherwise returns denom.",
+        "postgres_behavior": "Same behavior — NULLIF is standard SQL and supported identically.",
+        "bigquery_behavior": "NULLIF works identically, but BigQuery coerces types strictly — mixing INT and FLOAT may cause error; cast to same type first.",
+        "safe_alternative": "Always cast both to same type: NULLIF(CAST(denom AS FLOAT), 0). This avoids subtle coercion errors."
+      },
+      {
+        "construct": "Division with NULL semantics across dialects",
+        "duckdb_behavior": "Any arithmetic with NULL yields NULL — no surprise. Safe division with NULLIF ensures only zeros trigger NULL, not NULLs in data.",
+        "postgres_behavior": "Same NULL behavior. However, PostgreSQL's strong typing may throw 'operator is not unique' errors with mixed numeric types; explicit CAST helps.",
+        "bigquery_behavior": "Same NULL rules, but BigQuery silently coerces to FLOAT in division — e.g., 5/2 = 2.5 — unlike DuckDB where 5/2 = 2 (integer division) if both are INT.",
+        "safe_alternative": "Cast numerators and denominators to FLOAT before division to ensure non-integer results are expected: CAST(numerator AS FLOAT) / NULLIF(CAST(denominator AS FLOAT), 0)."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user asks 'how do I handle division when denominator might be zero?'",
+        "building formulas for rates, ratios, or percentages where denominator could be empty",
+        "output must be machine-readable (e.g., for ML models) without NaN/Inf",
+        "debugging division errors in existing queries — NULLIF is the most common fix"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to skip rows where denominator is zero entirely",
+          "use_instead": "seg_case_when_classification",
+          "why": "Safe division returns 0 or NULL for problematic rows; CASE WHEN lets you exclude them with WHERE instead"
+        },
+        {
+          "condition": "zero denominator should never occur — it indicates a data or logic error",
+          "use_instead": "seg_case_when_classification",
+          "why": "Instead of masking the error, raise it explicitly with CASE WHEN to halt or alert"
+        },
+        {
+          "condition": "user needs to handle negative denominators or custom thresholds",
+          "use_instead": "seg_case_when_classification",
+          "why": "NULLIF only catches zeros; CASE WHEN allows arbitrary logic like NULLIF(denom, 0) AND denom < 0"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "handle division by zero",
+        "avoid divide by zero error",
+        "safe ratio",
+        "how to get rate when denominator is zero",
+        "NULL or infinity",
+        "percentage when no denominator"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Both numerator and denominator are zero",
+        "what_happens": "NULLIF(0,0) returns NULL → 0 / NULL = NULL. Some users expect 0%, others expect 100% or NaN.",
+        "handling": "Define business logic: use COALESCE(..., 0) to default to 0%, or add explicit CASE WHEN to handle 0/0 as 0%, 100%, or error."
+      },
+      {
+        "scenario": "Numerator is negative, denominator is positive",
+        "what_happens": "Division yields a negative rate — mathematically correct, but may break downstream logic expecting non-negative percentages.",
+        "handling": "Use ABS() on numerator if direction doesn’t matter: ABS(numerator) / NULLIF(denominator, 0). Or add CASE WHEN to cap rates."
+      },
+      {
+        "scenario": "Numerator and denominator come from LEFT JOIN with no match",
+        "what_happens": "Both numerator and denominator may be NULL → division yields NULL. But business may want 0% or 0 numerator.",
+        "handling": "Wrap both with COALESCE: COALESCE(numerator, 0) / NULLIF(COALESCE(denominator, 0), 0). Confirm with data: check if NULLs mean 'no events' or 'error'."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(1) per row — trivial cost; NULLIF is a simple conditional check",
+      "when_slow": "Only relevant when denominator is derived from a complex subquery or aggregation — the cost is in the subquery, not safe division itself.",
+      "optimization_hint": "If division is done millions of times, precompute safe_ratio in a materialized view or CTE. Otherwise, it's negligible overhead. Avoid repeated NULLIF calls — compute once and reuse."
+    }
+  },
+  {
+    "id": "dq_null_safe_comparison",
+    "title": "NULL-Safe Comparison",
+    "intent_tags": [
+      "NULL equals NULL",
+      "IS NOT DISTINCT FROM",
+      "NULL comparison",
+      "three-valued logic",
+      "COALESCE equality",
+      "NULL handling in WHERE",
+      "null-safe join",
+      "null-safe filter",
+      "IS DISTINCT FROM",
+      "null comparison fix",
+      "NULL = NULL",
+      "IS NULL vs = NULL",
+      "three-value logic",
+      "SQL NULL trap",
+      "null comparison anomaly"
+    ],
+    "sql_features": [
+      "is_not_distinct_from",
+      "is_distinct_from",
+      "nullif",
+      "coalesce",
+      "case_when",
+      "where",
+      "join",
+      "group_by",
+      "select",
+      "cte"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "correctness",
+    "when_to_use": [
+      "user wants to compare two columns that may contain NULLs and treat NULL=NULL as TRUE",
+      "JOINing or filtering on columns where NULLs should match (e.g., matching NULL dimensions)",
+      "checking if two values are equal without NULL tripping — especially in UPDATE or MERGE",
+      "implementing deduplication that treats two NULL values as the same entity",
+      "writing business rules where NULL is a valid value (e.g., status='NULL' means unassigned)"
+    ],
+    "when_not_to_use": [
+      "when NULLs should *not* be considered equal — standard SQL treats NULL != NULL, and that’s correct for most use cases (e.g., distinct values in COUNT(DISTINCT))",
+      "for performance-critical queries where COALESCE with placeholder values is cheaper than IS NOT DISTINCT FROM — test execution plans",
+      "when working with databases that don’t support IS NOT DISTINCT FROM (e.g., older Postgres versions) — use COALESCE alternatives",
+      "when comparing NULL to a non-NULL constant — simply use IS NULL instead",
+      "for boolean logic where NULL means 'unknown' and you want three-valued evaluation — IS NOT DISTINCT FROM bypasses three-valued logic"
+    ],
+    "related_patterns": [
+      "dq_safe_division",
+      "seg_case_when_classification",
+      "agg_conditional_aggregation",
+      "join_fanout_detection",
+      "ts_date_trunc"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Standard SQL equality (=) returns NULL (unknown) when either operand is NULL — never TRUE or FALSE. IS NOT DISTINCT FROM treats two NULLs as equal (TRUE) and NULL ≠ non-NULL (FALSE), aligning with human intuition. It resolves three-valued logic surprises.",
+      "mental_model": "Think of NULL as 'missing value'. Is a missing value equal to another missing value? IS NOT DISTINCT FROM says 'yes' — two unknowns are still the same unknown. Standard = says 'we can’t know, so return NULL'.",
+      "key_behavior": "IS NOT DISTINCT FROM is standard SQL-92 but not universally supported. DuckDB and Postgres support it natively; BigQuery does not — use COALESCE alternatives there."
+    },
+    "template": {
+      "minimal": "SELECT a IS NOT DISTINCT FROM b AS null_safe_equal FROM data;\n-- For filtering: SELECT * FROM data WHERE a IS NOT DISTINCT FROM b;",
+      "realistic": "-- Match customers by email and state, treating NULL state as same (e.g., 'unknown')\nWITH customer_pairs AS (\n  SELECT\n    c1.id AS c1_id,\n    c2.id AS c2_id,\n    c1.email,\n    c1.state AS state1,\n    c2.state AS state2\n  FROM customers c1\n  JOIN customers c2 ON c1.id < c2.id\n  WHERE c1.email = c2.email\n)\nSELECT * FROM customer_pairs\nWHERE state1 IS NOT DISTINCT FROM state2;\n-- Equivalent without IS NOT DISTINCT FROM (portable):\nSELECT * FROM customer_pairs\nWHERE (state1 = state2) OR (state1 IS NULL AND state2 IS NULL);",
+      "composable": "-- Deduplication with null-safe key matching (combines dq_null_safe_comparison + dq_idempotent_dedup)\n-- Composes: dq_null_safe_comparison + dq_idempotent_dedup\nWITH customers_with_row AS (\n  SELECT *,\n    ROW_NUMBER() OVER (\n      PARTITION BY email,\n        state IS NOT DISTINCT FROM 'NY'\n      ORDER BY created_at DESC\n    ) AS rn\n  FROM customers\n)\nSELECT * EXCEPT(rn)\nFROM customers_with_row\nWHERE rn = 1;\n-- Explanation: Treats all 'NY' states as equal and all NULL states as equal, ensuring NULLs don't cause spurious duplicates."
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using = to compare columns that may be NULL",
+        "what_goes_wrong": "When both columns are NULL, a = b returns NULL (not TRUE), so the WHERE clause filters it out. The row disappears even though logically both are missing and should match.",
+        "symptom": "JOIN or filter returns fewer rows than expected; NULL values are silently dropped.",
+        "bad_sql": "SELECT * FROM t1 JOIN t2 ON t1.status = t2.status;",  
+        "good_sql": "SELECT * FROM t1 JOIN t2 ON t1.status IS NOT DISTINCT FROM t2.status;",
+        "detection_sql": "SELECT COUNT(*) FROM t1 JOIN t2 ON t1.status = t2.status WHERE t1.status IS NULL AND t2.status IS NULL; -- Returns 0 if = is used\nSELECT COUNT(*) FROM t1 JOIN t2 ON t1.status IS NOT DISTINCT FROM t2.status WHERE t1.status IS NULL AND t2.status IS NULL; -- Returns count of matching NULLs"
+      },
+      {
+        "mistake": "Using COALESCE with a sentinel value incorrectly",
+        "what_goes_wrong": "COALESCE(status, 'UNKNOWN') = COALESCE(status2, 'UNKNOWN') works, but if 'UNKNOWN' exists as a real value in the data, it collides — e.g., status='UNKNOWN' vs status=NULL both become 'UNKNOWN'.",
+        "symptom": "Rows with status='UNKNOWN' incorrectly match NULL rows — false positives.",
+        "bad_sql": "SELECT * FROM t1 JOIN t2 ON COALESCE(t1.status, 'UNKNOWN') = COALESCE(t2.status, 'UNKNOWN');",  
+        "good_sql": "SELECT * FROM t1 JOIN t2 ON (\n  (t1.status = t2.status) OR\n  (t1.status IS NULL AND t2.status IS NULL)\n);",
+        "detection_sql": "SELECT status, COUNT(*) FROM (SELECT status FROM t1 UNION ALL SELECT status FROM t2) GROUP BY 1 HAVING status = 'UNKNOWN';"
+      },
+      {
+        "mistake": "Assuming NULLIF solves comparison — using NULLIF in WHERE",
+        "what_goes_wrong": "NULLIF(col, value) returns NULL if col=value — it does not help equality. It’s designed for division, not comparison.",
+        "symptom": "Query returns no rows or crashes — NULLIF doesn’t address NULL comparison.",
+        "bad_sql": "SELECT * FROM t1 JOIN t2 ON NULLIF(t1.status, t2.status) IS NULL;",  
+        "good_sql": "SELECT * FROM t1 JOIN t2 ON t1.status IS NOT DISTINCT FROM t2.status;",
+        "detection_sql": "SELECT * FROM t1 JOIN t2 ON NULLIF(t1.status, t2.status) IS NULL; -- Runs but returns 0 rows if any NULLs exist"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "IS NOT DISTINCT FROM support",
+        "duckdb_behavior": "Fully supported — native and optimized.",
+        "postgres_behavior": "Fully supported since version 8.4. Recommended for portability.",
+        "bigquery_behavior": "Not supported — throws 'Function IS NOT DISTINCT FROM not found' error.",
+        "safe_alternative": "Use (a = b) OR (a IS NULL AND b IS NULL). This works everywhere, though verbose. For multiple columns, wrap in CASE or CTE."
+      },
+      {
+        "construct": "IS DISTINCT FROM (negation)",
+        "duckdb_behavior": "IS DISTINCT FROM returns TRUE if values differ *or* one is NULL and the other not. Its negation (IS NOT DISTINCT FROM) matches standard = for non-NULLs and treats NULL=NULL.",
+        "postgres_behavior": "Same behavior — IS DISTINCT FROM is supported and inverses IS NOT DISTINCT FROM.",
+        "bigquery_behavior": "Not supported — use CASE WHEN or COALESCE workarounds.",
+        "safe_alternative": "IS NOT DISTINCT FROM = NOT (a IS DISTINCT FROM b). Prefer IS NOT DISTINCT FROM for clarity. Avoid IS DISTINCT FROM to reduce confusion."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user says 'NULL should match NULL' in a business rule",
+        "building deduplication logic that treats missing values as identical",
+        "JOINing tables where NULL in dimension columns means the same (e.g., 'not assigned' or 'unknown')",
+        "debugging why rows disappear when comparing NULL columns"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants NULL and non-NULL to remain unequal — standard SQL behavior is correct",
+          "use_instead": "seg_case_when_classification",
+          "why": "IS NOT DISTINCT FROM *forces* NULL=TRUE; CASE WHEN preserves standard semantics and adds explicit handling"
+        },
+        {
+          "condition": "database lacks IS NOT DISTINCT FROM support (e.g., Redshift older versions)",
+          "use_instead": "seg_case_when_classification",
+          "why": "Portable COALESCE or explicit NULL checks work in all dialects"
+        },
+        {
+          "condition": "user wants to filter out NULLs entirely before comparison",
+          "use_instead": "seg_case_when_classification",
+          "why": "WHERE col IS NOT NULL first avoids the problem entirely — simpler than null-safe comparison"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "NULL equals NULL",
+        "two nulls should match",
+        "treat missing as same",
+        "how to compare null values",
+        "match on null columns"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Three columns with NULLs: a, b, c",
+        "what_happens": "a IS NOT DISTINCT FROM b IS NOT DISTINCT FROM c requires pairwise checks — (a IS NOT DISTINCT FROM b) AND (b IS NOT DISTINCT FROM c).",
+        "handling": "Chain comparisons: WHERE a IS NOT DISTINCT FROM b AND b IS NOT DISTINCT FROM c. For many columns, use ARRAY comparison (e.g., ARRAY[a,b] IS NOT DISTINCT FROM ARRAY[b,c]) if supported."
+      },
+      {
+        "scenario": "LEFT JOIN with NULL-safe ON clause",
+        "what_happens": "Rows with NULL in joined column are included — not filtered out. This preserves 'unknown' matches, but may inflate row counts if multiple NULLs exist.",
+        "handling": "Combine with aggregation or use a tiebreaker (e.g., ORDER BY id) to ensure deterministic matches."
+      },
+      {
+        "scenario": "Indexes don’t support IS NOT DISTINCT FROM",
+        "what_happens": "Query may fall back to full scan — NULL-safe comparison can’t use standard B-tree indexes on equality.",
+        "handling": "Create a functional index (e.g., COALESCE(col, 'NULL_SENTINEL')) if comparison is frequent. Or add a computed column with NULLs replaced."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(1) per row — IS NOT DISTINCT FROM is a simple conditional check",
+      "when_slow": "When applied to large joined tables without indexes, or when used in nested subqueries with correlated columns.",
+      "optimization_hint": "Pre-compute null-safe comparisons in a CTE or materialized column. For frequent comparisons, replace IS NOT DISTINCT FROM with a sentinel column: UPDATE t SET status_clean = COALESCE(status, 'NULL_VALUE'). Index status_clean."
+    }
+  },
+  {
+    "id": "dq_time_filter_before_window",
+    "title": "Time Filter Before Window Function",
+    "intent_tags": [
+      "filter time before window",
+      "window function timing",
+      "WHERE vs ORDER BY",
+      "qualify timing",
+      "CTE window",
+      "window function filter",
+      "late filter problem",
+      "window frame timing",
+      "correct window usage",
+      "time-series window",
+      "filter sequence",
+      "window context",
+      "window frame constraint",
+      "window order importance",
+      "pre-filter window"
+    ],
+    "sql_features": [
+      "window",
+      "cte",
+      "where",
+      "having",
+      "qualify",
+      "order_by",
+      "filter_clause",
+      "date_trunc",
+      "join",
+      "case_when",
+      "partition"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "correctness",
+    "when_to_use": [
+      "user needs to compute window functions (e.g., LAG, SUM OVER) but must exclude outliers, test data, or irrelevant time periods first",
+      "ensuring window frame uses only valid events (e.g., active users, non-test orders)",
+      "preventing data from a different period (e.g., 2025 test data) from polluting window calculations for 2024",
+      "avoiding performance issues by filtering before expensive window sorts"
+    ],
+    "when_not_to_use": [
+      "when filtering *should* happen after window evaluation (e.g., QUALIFY WHERE row_number = 1 after ranking)",
+      "when the window function itself defines the filter (e.g., using FILTER clause in aggregation)",
+      "when data quality issues mean filtering is redundant — use dq_grain_assertion instead",
+      "for time-insensitive windows (e.g., partition by user_id only, no time ordering)",
+      "when aggregating over entire history (e.g., total lifetime revenue) — time filter changes the domain"
+    ],
+    "related_patterns": [
+      "dq_grain_assertion",
+      "seg_case_when_classification",
+      "stat_rolling_z_score",
+      "ts_sessionization",
+      "agg_having_vs_where"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Window functions compute over the *entire* table unless filtered first. Applying time filters (WHERE, QUALIFY) after the window causes calculations to include rows that should be excluded, resulting in incorrect baselines (e.g., LAG looks at last row including test data). Filtering first ensures windows operate on clean, relevant data.",
+      "mental_model": "Think of a window function as a SQL 'lens' — if you put it over a messy dataset and then clean the dataset, the lens has already distorted the view. Filter *before* applying the lens to keep the lens on clean data.",
+      "key_behavior": "In DuckDB, QUALIFY filters *after* window evaluation — if used for time filtering, it includes all rows in the window calculation, not just the filtered ones. Always use a CTE or WHERE before the window."
+    },
+    "template": {
+      "minimal": "WITH filtered AS (\n  SELECT * FROM events WHERE event_date >= '2024-01-01'\n)\nSELECT\n  event_date,\n  event_type,\n  LAG(event_date) OVER (ORDER BY event_date) AS prev_event_date\nFROM filtered;",
+      "realistic": "-- Month-over-month revenue with test data excluded from window\nWITH valid_orders AS (\n  SELECT\n    DATE_TRUNC('month', order_date) AS month,\n    SUM(total) AS revenue\n  FROM orders\n  WHERE status NOT IN ('test', 'cancelled')\n    AND order_date >= '2023-01-01'\n  GROUP BY 1\n),\nwith_growth AS (\n  SELECT\n    month,\n    revenue,\n    LAG(revenue) OVER (ORDER BY month) AS prev_revenue,\n    ROUND(\n      (revenue - LAG(revenue) OVER (ORDER BY month))\n      / NULLIF(LAG(revenue) OVER (ORDER BY month), 0) * 100,\n    2) AS mom_growth_pct\n  FROM valid_orders\n)\nSELECT * FROM with_growth\nORDER BY month;",
+      "composable": "-- Sessionization with time-filtered events (combines dq_time_filter_before_window + ts_sessionization)\n-- Composes: dq_time_filter_before_window + ts_sessionization\nWITH valid_events AS (\n  SELECT\n    user_id,\n    event_time,\n    event_type\n  FROM events\n  WHERE event_time >= '2024-06-01'\n    AND event_type IS NOT NULL\n),\nwith_gap AS (\n  SELECT\n    user_id,\n    event_time,\n    event_type,\n    LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) AS prev_event_time,\n    EXTRACT(EPOCH FROM (event_time - prev_event_time)) / 60 AS gap_minutes\n  FROM valid_events\n),\nwith_session AS (\n  SELECT\n    user_id,\n    event_time,\n    event_type,\n    gap_minutes,\n    SUM(CASE WHEN gap_minutes > 30 OR gap_minutes IS NULL THEN 1 ELSE 0 END)\n      OVER (PARTITION BY user_id ORDER BY event_time) AS session_id\n  FROM with_gap\n)\nSELECT user_id, session_id, MIN(event_time) AS session_start, COUNT(*) AS events\nFROM with_session\nGROUP BY 1, 2\nORDER BY session_start DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using QUALIFY for time filtering *instead* of pre-filtering",
+        "what_goes_wrong": "QUALIFY filters *after* window functions evaluate. If you use QUALIFY WHERE event_date >= '2024-01-01' on a LAG, the window still includes rows before 2024, so LAG returns a 2023 value for the first 2024 row — misleading YoY comparisons.",
+        "symptom": "First 2024 row shows huge growth because LAG pulls from 2023, even though 2023 data is excluded in output.",
+        "bad_sql": "SELECT\n  order_date,\n  revenue,\n  LAG(revenue) OVER (ORDER BY order_date) AS prev_revenue\nFROM orders\nQUALIFY order_date >= '2024-01-01';",  
+        "good_sql": "WITH orders_2024 AS (\n  SELECT * FROM orders WHERE order_date >= '2024-01-01'\n)\nSELECT\n  order_date,\n  revenue,\n  LAG(revenue) OVER (ORDER BY order_date) AS prev_revenue\nFROM orders_2024;",
+        "detection_sql": "-- Compare first row LAG: if first 2024 row has LAG from before 2024, QUALIFY was misused\nSELECT order_date, prev_revenue FROM (above query) LIMIT 1;"
+      },
+      {
+        "mistake": "Filtering in WHERE after window function definition",
+        "what_goes_wrong": "WHERE clause runs *before* window evaluation — but if the WHERE is applied *after* the SELECT (e.g., in an outer query), the window was computed on unfiltered data.",
+        "symptom": "Outer query filters, but window still uses all rows — window appears to ignore filters.",
+        "bad_sql": "SELECT month, revenue, LAG(revenue) OVER (ORDER BY month) AS prev FROM orders\nWHERE order_date >= '2024-01-01'; -- This is OK, WHERE runs before window\nSELECT * FROM (\n  SELECT month, revenue, LAG(revenue) OVER (ORDER BY month) AS prev FROM orders\n) WHERE order_date >= '2024-01-01'; -- BAD: window on all orders, filter after\n",  
+        "good_sql": "SELECT month, revenue, LAG(revenue) OVER (ORDER BY month) AS prev\nFROM orders\nWHERE order_date >= '2024-01-01'; -- WHERE runs before window",
+        "detection_sql": "-- Test: filter on order_date in inner vs outer query. If LAG differs, window ran on unfiltered data\nWITH outer_filter AS (\n  SELECT month, revenue, LAG(revenue) OVER (ORDER BY month) AS prev\n  FROM orders WHERE order_date >= '2024-01-01'\n)\nSELECT prev FROM outer_filter LIMIT 1;"
+      },
+      {
+        "mistake": "Using PARTITION BY in window but not filtering the partition key",
+        "what_goes_wrong": "Window partitions may include irrelevant groups (e.g., 'test' users). Filtering after window doesn’t remove their influence — the partition still exists, just filtered in output.",
+        "symptom": "LAG for a user shows previous values from test accounts or excluded segments.",
+        "bad_sql": "SELECT\n  user_id,\n  order_date,\n  revenue,\n  LAG(revenue) OVER (PARTITION BY user_id ORDER BY order_date) AS prev\nFROM orders\nQUALIFY user_id NOT IN (SELECT user_id FROM test_users);",  
+        "good_sql": "WITH valid_orders AS (\n  SELECT * FROM orders\n  WHERE user_id NOT IN (SELECT user_id FROM test_users)\n)\nSELECT\n  user_id,\n  order_date,\n  revenue,\n  LAG(revenue) OVER (PARTITION BY user_id ORDER BY order_date) AS prev\nFROM valid_orders;",
+        "detection_sql": "-- Verify LAG for first order in 2024 doesn’t include test users\nSELECT user_id, order_date, prev FROM (above query) WHERE order_date >= '2024-01-01' ORDER BY order_date LIMIT 5;"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "QUALIFY vs WHERE in DuckDB",
+        "duckdb_behavior": "QUALIFY filters *after* window functions — it’s like HAVING for windows. Using QUALIFY for time filtering causes windows to include excluded rows.",
+        "postgres_behavior": "QUALIFY not supported — must use CTEs or subqueries with WHERE before window.",
+        "bigquery_behavior": "QUALIFY supported but same behavior as DuckDB — filter *before* windows.",
+        "safe_alternative": "Always use CTE + WHERE or WHERE in the same SELECT as the window definition. Reserve QUALIFY for row-number deduplication (e.g., QUALIFY ROW_NUMBER() = 1)."
+      },
+      {
+        "construct": "WHERE in same SELECT as window",
+        "duckdb_behavior": "WHERE runs before window evaluation — safe for time filtering. But WHERE only applies to the current SELECT, so if you later wrap in an outer query, the filter may be lost.",
+        "postgres_behavior": "Same: WHERE in SELECT runs before window.",
+        "bigquery_behavior": "Same behavior, but BigQuery’s strict query planning may reorder operations in complex queries — verify with EXPLAIN.",
+        "safe_alternative": "Pre-filter in a CTE to make the dependency explicit and avoid outer query surprises: WITH filtered AS (SELECT * FROM ... WHERE ...), windowed AS (SELECT ..., window() FROM filtered)."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user asks 'why does my window function include excluded data?'",
+        "building time-sensitive windows (e.g., moving averages, LAG) that must exclude outliers",
+        "debugging incorrect baselines in YoY or MoM calculations",
+        "optimizing performance by reducing window size"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to filter *after* window evaluation (e.g., top N per group)",
+          "use_instead": "wf_row_number_top_n",
+          "why": "QUALIFY or WHERE after ranking is correct — pre-filtering would alter the ranking logic"
+        },
+        {
+          "condition": "filtering is part of window logic (e.g., SUM(r revenue) FILTER (WHERE status = 'active'))",
+          "use_instead": "agg_conditional_aggregation",
+          "why": "FILTER clause handles per-row inclusion inside the window — no separate filter needed"
+        },
+        {
+          "condition": "data quality issues require deduplication before filtering",
+          "use_instead": "dq_grain_assertion",
+          "why": "Fix data inconsistencies first — clean data prevents downstream window errors"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "filter time before window",
+        "exclude test data from moving average",
+        "how to window without outliers",
+        "window includes excluded rows",
+        "time filter order"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "NULLs in time column (e.g., event_time = NULL)",
+        "what_happens": "WHERE event_time >= '2024-01-01' excludes NULLs — correct. But if later windows ORDER BY event_time, NULLs get sorted to end by default — may break expectations.",
+        "handling": "Ensure NULLs are rare or filter explicitly: WHERE event_time IS NOT NULL. Or handle with COALESCE(event_time, '1970-01-01')."
+      },
+      {
+        "scenario": "Time filter creates partition with only one row",
+        "what_happens": "Window returns NULL for LAG/LEAD (no previous/next row). In sessionization, this creates a 1-event session.",
+        "handling": "After window, use COALESCE(LAG(...), event_time) or handle single-row cases explicitly in CASE WHEN."
+      },
+      {
+        "scenario": "Time filter and window ORDER BY use different columns",
+        "what_happens": "Filtering on order_date but ordering by event_time may include rows where order_date < filter but event_time >= filter — logical inconsistency.",
+        "handling": "Align filter and ORDER BY columns, or use the same grain in both (e.g., DATE_TRUNC('day', event_time) in both WHERE and ORDER BY)."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) for filter, O(n log n) for window sort — dominated by sort",
+      "when_slow": "Large tables with complex window functions (multiple OVER clauses, large partitions). Pre-filtering reduces sort size significantly.",
+      "optimization_hint": "Pre-filter in a CTE to reduce window input size. Use EXPLAIN to verify the planner pushes down filters — in DuckDB, filter should appear in the window scan plan, not after."
+    }
+  },
+  {
+    "id": "dq_idempotent_dedup",
+    "title": "Idempotent Deduplication",
+    "intent_tags": [
+      "ROW_NUMBER dedup",
+      "deterministic dedup",
+      "safe deduplication",
+      "re-run safe",
+      "no duplicates after",
+      "dedupe with tiebreaker",
+      "stable dedup",
+      "idempotent row_number",
+      "consistent deduplication",
+      "primary key enforcement",
+      "dedup safety",
+      "ETL dedup",
+      "duplicate fix",
+      "grain enforcement",
+      "reproducible results"
+    ],
+    "sql_features": [
+      "row_number",
+      "order_by",
+      "partition_by",
+      "cte",
+      "delete",
+      "merge",
+      "window",
+      "distinct",
+      "coalesce",
+      "loaded_at",
+      "sdc_received_at"
+    ],
+    "difficulty": "expert",
+    "pattern_type": "correctness",
+    "when_to_use": [
+      "user needs to deduplicate data but must re-run the deduplication process safely (idempotency)",
+      "building ETL pipelines where repeated runs shouldn’t change already-deleted duplicates",
+      "enforcing a grain after source data has duplicates (e.g., order_items with duplicate rows)",
+      "deleting duplicates while keeping the 'best' record (e.g., latest loaded_at)",
+      "preparing staging tables for downstream analysis with strict grain requirements"
+    ],
+    "when_not_to_use": [
+      "when all duplicates are equally valid and only one should be kept — use grain assertion instead",
+      "when duplicates represent distinct events (e.g., retries with different timestamps) — deduplication loses information",
+      "for data lakes where raw data must be preserved — deduplicate only in processed layers",
+      "when source system guarantees uniqueness — deduplication adds unnecessary overhead",
+      "for time-sensitive near-real-time flows where deduplication latency is unacceptable",
+      "when 'best' record definition is unclear — use dq_grain_assertion to find duplicates first"
+    ],
+    "related_patterns": [
+      "dq_grain_assertion",
+      "dq_null_safe_comparison",
+      "seg_case_when_classification",
+      "agg_group_by_having",
+      "ts_date_spine_generation"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Idempotent deduplication uses ROW_NUMBER to assign a unique rank within each duplicate group, ordered by a deterministic tiebreaker (e.g., loaded_at DESC), then deletes all but rank=1. Re-running the same query leaves the result unchanged — it’s safe for incremental ETL.",
+      "mental_model": "Imagine sorting duplicate rows by timestamp (newest first) and only keeping the top one. Re-sorting the same rows always yields the same top row — the process is deterministic and re-runnable.",
+      "key_behavior": "The tiebreaker column must be monotonic and deterministic (e.g., loaded_at, _sdc_received_at, updated_at). Avoid using system-generated IDs like UUIDs unless they correlate with insertion order."
+    },
+    "template": {
+      "minimal": "WITH dedup AS (\n  SELECT *,\n    ROW_NUMBER() OVER (PARTITION BY key ORDER BY loaded_at DESC) AS rn\n  FROM raw_table\n)\nDELETE FROM raw_table WHERE id IN (SELECT id FROM dedup WHERE rn > 1);",
+      "realistic": "-- Keep latest order_item per (order_id, product_id) using loaded_at\n-- Safe to re-run — never removes rows that were kept previously\nWITH order_items_rn AS (\n  SELECT\n    id,\n    order_id,\n    product_id,\n    quantity,\n    loaded_at,\n    ROW_NUMBER() OVER (\n      PARTITION BY order_id, product_id\n      ORDER BY loaded_at DESC, id DESC\n    ) AS rn\n  FROM order_items\n)\n-- Delete all duplicates\nDELETE FROM order_items\nWHERE id IN (SELECT id FROM order_items_rn WHERE rn > 1);",
+      "composable": "-- Idempotent dedup + grain assertion (combines dq_idempotent_dedup + dq_grain_assertion)\n-- Composes: dq_idempotent_dedup + dq_grain_assertion\nWITH order_items_rn AS (\n  SELECT\n    *,\n    ROW_NUMBER() OVER (\n      PARTITION BY order_id, product_id\n      ORDER BY loaded_at DESC, id DESC\n    ) AS rn\n  FROM order_items\n),\ndeduped AS (\n  SELECT * FROM order_items_rn WHERE rn = 1\n),\ngrain_check AS (\n  SELECT\n    COUNT(*) AS total_rows,\n    COUNT(DISTINCT order_id, product_id) AS unique_combos,\n    COUNT(*) - COUNT(DISTINCT order_id, product_id) AS dupes\n  FROM deduped\n)\nSELECT\n  CASE\n    WHEN dupes = 0 THEN 'PASS: grain verified'\n    ELSE 'FAIL: ' || dupes || ' duplicates remain'\n  END AS grain_status\nFROM grain_check;\n-- Note: Deduplication is idempotent — re-running removes no new rows."
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using ORDER BY on non-monotonic column (e.g., event_date)",
+        "what_goes_wrong": "If the tiebreaker changes between runs (e.g., event_date is null or updated), different rows get rank=1 each time — duplicates reappear or rows flicker in/out.",
+        "symptom": "Repeated runs of the dedup query change which rows are kept — not idempotent.",
+        "bad_sql": "SELECT *, ROW_NUMBER() OVER (PARTITION BY key ORDER BY event_date DESC) AS rn FROM table;",  
+        "good_sql": "SELECT *, ROW_NUMBER() OVER (PARTITION BY key ORDER BY loaded_at DESC, id DESC) AS rn FROM table;",
+        "detection_sql": "SELECT event_date, COUNT(*) FROM (above) GROUP BY 1 HAVING COUNT(*) > 1;"
+      },
+      {
+        "mistake": "Not including a stable tiebreaker column in ORDER BY",
+        "what_goes_wrong": "If all tiebreaker values are identical (e.g., all loaded_at = NULL), ROW_NUMBER assigns arbitrary ranks. Re-running may keep different rows — not idempotent.",
+        "symptom": "Deduplication results change between runs, or duplicate groups vanish inconsistently.",
+        "bad_sql": "SELECT *, ROW_NUMBER() OVER (PARTITION BY key ORDER BY loaded_at DESC) AS rn FROM table;",  
+        "good_sql": "SELECT *, ROW_NUMBER() OVER (PARTITION BY key ORDER BY loaded_at DESC, id DESC) AS rn FROM table;",
+        "detection_sql": "SELECT COUNT(DISTINCT loaded_at) FROM raw_table;"
+      },
+      {
+        "mistake": "Deduplicating without preserving source metadata",
+        "what_goes_wrong": "Deleting rows loses audit trail — you can’t prove which record was 'best' or debug why duplicates occurred.",
+        "symptom": "No way to trace back to original sources or understand data lineage.",
+        "bad_sql": "DELETE FROM raw_table WHERE id NOT IN (SELECT MIN(id) FROM raw_table GROUP BY key);",  
+        "good_sql": "INSERT INTO dedup_audit (key, deleted_id, kept_id, reason)\nSELECT key, id, MIN(id) AS kept_id, 'first by id' FROM raw_table GROUP BY key HAVING COUNT(*) > 1;",
+        "detection_sql": "SELECT COUNT(*) FROM dedup_audit WHERE deleted_id IS NOT NULL;"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "DELETE with subquery in DuckDB",
+        "duckdb_behavior": "DuckDB supports DELETE ... WHERE id IN (subquery). However, subquery must reference the same table in a way that avoids self-reference errors — use a CTE for clarity.",
+        "postgres_behavior": "Same DELETE syntax works. Postgres also supports DELETE ... USING for more complex joins.",
+        "bigquery_behavior": "BigQuery does not support DELETE in standard SQL — use MERGE instead for idempotent dedup.",
+        "safe_alternative": "Use MERGE in BigQuery: MERGE target USING source ON ... WHEN MATCHED AND rn > 1 THEN DELETE. In DuckDB/Postgres, CTE + DELETE is safe."
+      },
+      {
+        "construct": "NULL in tiebreaker column",
+        "duckdb_behavior": "ORDER BY loaded_at DESC puts NULLs last — rows with NULL loaded_at are ranked after non-NULLs. If all loaded_at are NULL, tiebreaker fails.",
+        "postgres_behavior": "Same NULL behavior — NULL sorts last unless specified.",
+        "bigquery_behavior": "Same — ORDER BY handles NULL consistently.",
+        "safe_alternative": "Coalesce tiebreaker: ORDER BY COALESCE(loaded_at, '1970-01-01') DESC. Or ensure no NULLs before dedup (filter: WHERE loaded_at IS NOT NULL)."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user asks 'how do I deduplicate safely without breaking future runs?'",
+        "building automated ETL that runs daily and must not affect data integrity",
+        "deleting duplicates while keeping the most recent record (e.g., latest sync)",
+        "enforcing grain on staging tables before warehousing"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to *flag* duplicates without deleting (e.g., for review)",
+          "use_instead": "seg_case_when_classification",
+          "why": "Add a rn column to identify duplicates, then export for manual review instead of deleting"
+        },
+        {
+          "condition": "all duplicates are valid and should be kept — grain violation is a feature",
+          "use_instead": "agg_group_by_having",
+          "why": "Deduplication is wrong — instead, aggregate *with* duplicates or use COUNT(*) to measure duplication rate"
+        },
+        {
+          "condition": "source guarantees uniqueness — deduplication is redundant",
+          "use_instead": "dq_grain_assertion",
+          "why": "Verify grain instead of altering data — no need to dedup if source is trusted"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "safe to re-run dedup",
+        "idempotent duplicate removal",
+        "how to delete duplicates",
+        "keep latest duplicate",
+        "stable deduplication"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Multiple duplicate groups with same tiebreaker values",
+        "what_happens": "If loaded_at and id are identical (e.g., same batch insert), ROW_NUMBER assigns arbitrary ranks — different rows may be kept across runs.",
+        "handling": "Add a third tiebreaker: ORDER BY loaded_at DESC, id DESC, RANDOM() for non-deterministic but stable dedup? Better: use MD5 of row to find *logical* duplicates first."
+      },
+      {
+        "scenario": "Dedup on partition with only one row",
+        "what_happens": "rn = 1 is kept — no issue. But if logic is COUNT(*) - COUNT(DISTINCT key), it shows '0 duplicates' — correct.",
+        "handling": "No adjustment needed — single-row partitions are handled gracefully by ROW_NUMBER."
+      },
+      {
+        "scenario": "Very large partition (e.g., 1M+ duplicates per key)",
+        "what_happens": "ROW_NUMBER sorts all duplicates — memory-intensive, may spill to disk.",
+        "handling": "Pre-aggregate: SELECT key, MAX(id) AS keep_id FROM table GROUP BY key, then JOIN to delete others. Avoids sorting all rows."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for sort + O(n) for scan",
+      "when_slow": "Partitions with >1M rows or high cardinality keys (e.g., user_id with 100M+ rows) — sort dominates time and memory.",
+      "optimization_hint": "Index the partition key and ORDER BY columns. Pre-filter to relevant date range. In DuckDB, use `PRAGMA threads=1` only if single-threaded to avoid sorting overhead."
+    }
+  }
+]

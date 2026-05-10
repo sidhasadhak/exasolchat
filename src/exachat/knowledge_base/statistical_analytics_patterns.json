@@ -1,0 +1,1248 @@
+[
+  {
+    "id": "stat_percentile_distribution",
+    "title": "Percentile Distribution (P25/P50/P75/P90/P95/P99)",
+    "intent_tags": [
+      "percentile",
+      "quartile",
+      "decile",
+      "median",
+      "P50",
+      "P95",
+      "distribution",
+      "quartiles",
+      "deciles",
+      "quintiles",
+      "percentiles",
+      "P25",
+      "P75",
+      "P99",
+      "P90",
+      "P10",
+      "P999"
+    ],
+    "sql_features": [
+      "percentile_cont",
+      "percentile_disc",
+      "window",
+      "cte"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "statistical",
+    "when_to_use": [
+      "user wants quartile, decile, or percentile distribution of a metric (e.g., revenue, order_value)",
+      "user’s question includes '25th percentile', 'P95 threshold', 'top 10% customers'",
+      "comparing individuals to a distribution (e.g., 'is this order in the top quartile?')",
+      "building benchmark reports (e.g., 'customers in P90+ spend 2× more')"
+    ],
+    "when_not_to_use": [
+      "user wants cumulative or rolling percentiles — use window functions with CUME_DIST instead",
+      "user needs exact quantiles for small datasets (<100 rows) — exact COUNT(DISTINCT) + ranking may be clearer",
+      "distribution is highly skewed with many outliers — consider IQR-based robust methods instead"
+    ],
+    "related_patterns": [
+      "stat_iqr_outlier",
+      "stat_rolling_zscore",
+      "stat_zscore_outlier",
+      "seg_dynamic_threshold",
+      "agg_approx_distinct"
+    ],
+    "concept_explanation": {
+      "what_it_does": "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY revenue) returns the exact 50th percentile (median), interpolating between rows if needed. PERCENTILE_DISC returns the actual row value without interpolation. Both give distribution anchors for classification.",
+      "mental_model": "Imagine a crowd lined up by height. P50 is the height where half the crowd is shorter and half taller — if two people are exactly in the middle, P50 interpolates their heights. P95 means 95% of people are shorter, 5% taller.",
+      "key_behavior": "PERCENTILE_CONT requires WITHIN GROUP (ORDER BY ...) clause. The ORDER BY must be deterministic (no ties or use tiebreaker). Interpolation makes P50 more accurate than P50 from PERCENTILE_DISC for even-sized datasets."
+    },
+    "template": {
+      "minimal": "-- Revenue distribution: P25, P50, P75, P90, P95, P99\nSELECT\n  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) AS p25_revenue,\n  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY revenue) AS p50_revenue,\n  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS p75_revenue,\n  PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY revenue) AS p90_revenue,\n  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY revenue) AS p95_revenue,\n  PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY revenue) AS p99_revenue\nFROM order_items",
+      "realistic": "-- Revenue percentiles by region, plus classify each order\n-- Grain: one row per order with percentile bucket\nWITH percentiles AS (\n  SELECT\n    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) FILTER (WHERE c.region = 'North') AS p25_north,\n    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) FILTER (WHERE c.region = 'North') AS p50_north,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) FILTER (WHERE c.region = 'North') AS p75_north,\n    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) FILTER (WHERE c.region = 'South') AS p25_south,\n    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) FILTER (WHERE c.region = 'South') AS p50_south,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) FILTER (WHERE c.region = 'South') AS p75_south\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n),\norder_metrics AS (\n  SELECT\n    c.region,\n    o.order_id,\n    oi.quantity * oi.unit_price AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n),\nclassified AS (\n  SELECT\n    om.region,\n    om.order_id,\n    om.revenue,\n    CASE\n      WHEN om.region = 'North' THEN\n        CASE\n          WHEN om.revenue <= p.p25_north THEN 'P0-P25'\n          WHEN om.revenue <= p.p50_north THEN 'P25-P50'\n          WHEN om.revenue <= p.p75_north THEN 'P50-P75'\n          ELSE 'P75-P100'\n        END\n      WHEN om.region = 'South' THEN\n        CASE\n          WHEN om.revenue <= p.p25_south THEN 'P0-P25'\n          WHEN om.revenue <= p.p50_south THEN 'P25-P50'\n          WHEN om.revenue <= p.p75_south THEN 'P50-P75'\n          ELSE 'P75-P100'\n        END\n      ELSE 'Unknown'\n    END AS percentile_bucket\n  FROM order_metrics om\n  CROSS JOIN percentiles p\n)\nSELECT\n  region,\n  percentile_bucket,\n  COUNT(*) AS order_count,\n  AVG(revenue) AS avg_revenue\nFROM classified\nGROUP BY region, percentile_bucket\nORDER BY region, percentile_bucket",
+      "composable": "-- Percentile thresholds per region, then flag orders above P90\n-- Composes: stat_percentile_distribution + stat_zscore_outlier\nWITH region_percentiles AS (\n  SELECT\n    c.region,\n    PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) AS p90_revenue,\n    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) AS p95_revenue,\n    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) AS p99_revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY c.region\n),\norder_metrics AS (\n  SELECT\n    c.region,\n    o.order_id,\n    oi.quantity * oi.unit_price AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n)\nSELECT\n  om.region,\n  om.order_id,\n  om.revenue,\n  rp.p90_revenue,\n  rp.p95_revenue,\n  rp.p99_revenue,\n  CASE\n    WHEN om.revenue > rp.p99_revenue THEN 'P99+'\n    WHEN om.revenue > rp.p95_revenue THEN 'P95-P99'\n    WHEN om.revenue > rp.p90_revenue THEN 'P90-P95'\n    ELSE 'Below P90'\n  END AS revenue_tier\nFROM order_metrics om\nJOIN region_percentiles rp ON om.region = rp.region"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using PERCENTILE_CONT without WITHIN GROUP",
+        "what_goes_wrong": "PERCENTILE_CONT requires WITHIN GROUP (ORDER BY ...). Without it, DuckDB throws a syntax error; Postgres returns 'syntax error at or near WITHIN'.",
+        "symptom": "Query fails with 'syntax error' on PERCENTILE_CONT.",
+        "bad_sql": "SELECT PERCENTILE_CONT(0.5) FROM orders",
+        "good_sql": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY order_total) FROM orders",
+        "detection_sql": "SELECT * FROM (\n  SELECT PERCENTILE_CONT(0.5) FROM orders\n) LIMIT 1"
+      },
+      {
+        "mistake": "Assuming PERCENTILE_CONT = PERCENTILE_DISC",
+        "what_goes_wrong": "PERCENTILE_CONT interpolates between rows; PERCENTILE_DISC returns an actual row value. For even datasets, P50 may differ by one row’s value.",
+        "symptom": "P50 = 50.0 (CONT) vs 45 (DISC) — user expects exact row value but gets interpolated.",
+        "bad_sql": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY order_total) AS median FROM orders",
+        "good_sql": "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY order_total) AS median FROM orders",
+        "detection_sql": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY order_total) AS cont,\n       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY order_total) AS disc\nFROM orders"
+      },
+      {
+        "mistake": "Using percentiles on small datasets (<100 rows)",
+        "what_goes_wrong": "With <100 rows, percentile positions may be unstable. A 1-row change can shift percentiles significantly — P50 could jump by 20%.",
+        "symptom": "Percentile thresholds change wildly between days — not reliable for benchmarking.",
+        "bad_sql": "SELECT PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY order_total) FROM orders",
+        "good_sql": "SELECT COUNT(*) FROM orders\n-- Only use percentiles if count > 100",
+        "detection_sql": "SELECT COUNT(*) FROM orders WHERE order_date >= CURRENT_DATE - INTERVAL '30 days'"
+      },
+      {
+        "mistake": "Missing GROUP BY when computing region-level percentiles",
+        "what_goes_wrong": "PERCENTILE_CONT is an aggregate function — without GROUP BY, it returns a single row for the entire dataset, masking region differences.",
+        "symptom": "Only one row returned — user expects multiple rows (one per region).",
+        "bad_sql": "SELECT c.region, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price)\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id\nJOIN customers c ON o.customer_id = c.customer_id\nGROUP BY c.region",
+        "good_sql": "SELECT c.region, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price) FILTER (WHERE c.region = c.region)\nFROM ... GROUP BY c.region",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT c.region, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY oi.quantity * oi.unit_price)\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  GROUP BY c.region\n) t"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "PERCENTILE_CONT syntax per dialect",
+        "duckdb_behavior": "DuckDB supports PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ...). It interpolates by default.",
+        "postgres_behavior": "Postgres supports the same syntax. It also supports quantile() for array-based estimation.",
+        "bigquery_behavior": "BigQuery supports PERCENTILE_CONT() OVER (ORDER BY ...) as a window function, but not PERCENTILE_CONT WITHIN GROUP as an aggregate.",
+        "safe_alternative": "For BigQuery, use PERCENTILE_CONT() OVER (ORDER BY ...) and filter for the percentile position. For DuckDB/Postgres, WITHIN GROUP is preferred."
+      },
+      {
+        "construct": "FILTER clause with PERCENTILE_CONT",
+        "duckdb_behavior": "DuckDB supports FILTER (WHERE ...) with PERCENTILE_CONT for conditional percentile computation.",
+        "postgres_behavior": "Postgres supports FILTER with PERCENTILE_CONT from 9.4 onward.",
+        "bigquery_behavior": "BigQuery does not support FILTER with aggregate functions — use CASE WHEN instead.",
+        "safe_alternative": "For portability, use CASE WHEN: PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CASE WHEN region = 'North' THEN revenue END)."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants *exact* distribution thresholds (P25, P50, P75, etc.)",
+        "user’s question includes 'percentile', 'P95', 'quartile', 'P99'",
+        "data has sufficient size (>100 rows)",
+        "classification or benchmarking is needed (e.g., 'top 10% customers')"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants rolling or time-based percentiles",
+          "use_instead": "stat_rolling_zscore",
+          "why": "Rolling percentiles use window functions over time"
+        },
+        {
+          "condition": "distribution is highly skewed and outliers dominate",
+          "use_instead": "stat_iqr_outlier",
+          "why": "IQR is robust to outliers; percentiles can be stretched by extreme values"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "percentile",
+        "P95",
+        "P99",
+        "P25",
+        "P75",
+        "quartile",
+        "decile",
+        "median",
+        "P50"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Dataset has only one row",
+        "what_happens": "P50 returns that row’s value; P25/P75 may return NULL or same value — undefined behavior.",
+        "handling": "Add row count check: WHERE COUNT(*) > 1 before computing percentiles."
+      },
+      {
+        "scenario": "All values are identical",
+        "what_happens": "P25/P50/P75 all return the same value — no spread in distribution.",
+        "handling": "No issue — percentiles are equal. Use STDDEV to detect zero variance."
+      },
+      {
+        "scenario": "NULLs in ORDER BY column",
+        "what_happens": "PERCENTILE_CONT ignores NULLs — same as other aggregates.",
+        "handling": "No change needed. But if NULLs represent missing data, consider imputation or filtering."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for sorting, O(1) for percentile lookup. Dominated by sort cost.",
+      "when_slow": "Large datasets (>10M rows) or many percentile thresholds (e.g., P0.1 to P99.9).",
+      "optimization_hint": "Pre-filter to relevant rows before computing percentiles. For repeated use, materialize percentiles in a CTE. Use APPROX_PERCENTILE_CONT for approximate, faster computation."
+    }
+  },
+  {
+    "id": "stat_histogram_bucketing",
+    "title": "Histogram Bucketing with WIDTH_BUCKET",
+    "intent_tags": [
+      "histogram",
+      "bucketing",
+      "WIDTH_BUCKET",
+      "equal-range bins",
+      "equal-width bins",
+      "quantize",
+      "binning",
+      "distribution bins",
+      "equal range",
+      "fixed-width bins",
+      "frequency histogram"
+    ],
+    "sql_features": [
+      "width_bucket",
+      "histogram",
+      "window",
+      "cte"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "statistical",
+    "when_to_use": [
+      "user wants equal-width bins for histogram (e.g., $0-$20, $20-$40, $40-$60)",
+      "user’s question includes 'bucket by $20 increments', 'equal-width bins'",
+      "building dashboards with frequency distributions (e.g., 'how many orders between $50-$100')",
+      "preparing data for plotting histograms in visualization tools"
+    ],
+    "when_not_to_use": [
+      "user wants equal-count bins (e.g., 100 buckets with same *count*, not same *range*) — use NTILE instead",
+      "distribution is highly skewed — consider log transformation or IQR-based bucketing",
+      "user wants dynamic bins (e.g., adaptive to data distribution) — use percentile-based thresholds"
+    ],
+    "related_patterns": [
+      "stat_percentile_distribution",
+      "stat_iqr_outlier",
+      "stat_rolling_zscore",
+      "seg_dynamic_threshold",
+      "stat_zscore_outlier"
+    ],
+    "concept_explanation": {
+      "what_it_does": "WIDTH_BUCKET(value, min, max, num_buckets) maps value into one of num_buckets equal-width intervals between min and max. Values outside [min, max] are assigned to bucket 0 or num_buckets + 1. Perfect for equal-range histograms.",
+      "mental_model": "Imagine dividing a ruler into equal segments — each segment covers the same dollar range (e.g., $0-$10), regardless of how many observations fall in each segment.",
+      "key_behavior": "WIDTH_BUCKET uses [min, max) for buckets, so max value maps to overflow bucket (num_buckets+1). Use min - ε and max + ε or handle overflow explicitly."
+    },
+    "template": {
+      "minimal": "-- Revenue bucketing with $20 bins from $0 to $200\nSELECT\n  revenue,\n  WIDTH_BUCKET(revenue, 0, 200, 10) AS bucket,\n  (WIDTH_BUCKET(revenue, 0, 200, 10) - 1) * 20 AS bucket_start,\n  WIDTH_BUCKET(revenue, 0, 200, 10) * 20 AS bucket_end\nFROM orders",
+      "realistic": "-- Equal-width histogram of order revenue, with frequency and percentage\n-- Grain: one row per bucket\nWITH order_revenue AS (\n  SELECT quantity * unit_price AS revenue FROM order_items\n  WHERE order_id IN (SELECT order_id FROM orders WHERE order_date >= CURRENT_DATE - INTERVAL '30 days')\n),\nmin_max AS (\n  SELECT MIN(revenue) AS min_rev, MAX(revenue) AS max_rev FROM order_revenue\n),\nbucketed AS (\n  SELECT\n    revenue,\n    WIDTH_BUCKET(revenue, COALESCE(min_rev, 0), COALESCE(max_rev, 100), 10) AS bucket\n  FROM order_revenue, min_max\n),\nfinal AS (\n  SELECT\n    b.bucket,\n    (b.bucket - 1) * ((max_rev - min_rev) / 10) AS bucket_start,\n    b.bucket * ((max_rev - min_rev) / 10) AS bucket_end,\n    COUNT(*) AS frequency,\n    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS pct_of_total\n  FROM bucketed b, min_max\n  GROUP BY b.bucket, min_rev, max_rev\n)\nSELECT * FROM final ORDER BY bucket",
+      "composable": "-- Equal-width buckets per region, then compare to global distribution\n-- Composes: stat_histogram_bucketing + stat_percentile_distribution\nWITH order_revenue AS (\n  SELECT\n    c.region,\n    oi.quantity * oi.unit_price AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n),\nregion_min_max AS (\n  SELECT region, MIN(revenue) AS min_rev, MAX(revenue) AS max_rev\n  FROM order_revenue\n  GROUP BY region\n),\nbucketed AS (\n  SELECT\n    r.region,\n    r.revenue,\n    WIDTH_BUCKET(r.revenue, rr.min_rev, rr.max_rev, 5) AS bucket\n  FROM order_revenue r\n  JOIN region_min_max rr ON r.region = rr.region\n)\nSELECT\n  region,\n  bucket,\n  COUNT(*) AS frequency\nFROM bucketed\nGROUP BY region, bucket\nORDER BY region, bucket"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Ignoring overflow/underflow buckets (0 and num_buckets+1)",
+        "what_goes_wrong": "WIDTH_BUCKET assigns bucket 0 to values < min, and num_buckets+1 to values > max. Users often filter these out, losing edge cases or miscounting data coverage.",
+        "symptom": "Histogram misses 5% of data in the tails — bucket 0 and 6 appear but are excluded.",
+        "bad_sql": "SELECT bucket, COUNT(*) FROM (\n  SELECT WIDTH_BUCKET(revenue, 0, 100, 5) AS bucket FROM orders\n) WHERE bucket BETWEEN 1 AND 5\nGROUP BY bucket",
+        "good_sql": "SELECT\n  CASE\n    WHEN bucket = 0 THEN 'underflow'\n    WHEN bucket = 6 THEN 'overflow'\n    ELSE CAST((bucket - 1) * 20 AS TEXT) || '-' || CAST(bucket * 20 AS TEXT)\n  END AS bucket_label,\n  COUNT(*)\nFROM (\n  SELECT WIDTH_BUCKET(revenue, 0, 100, 5) AS bucket FROM orders\n) t\nGROUP BY bucket\nORDER BY bucket",
+        "detection_sql": "SELECT MIN(revenue) AS min_rev, MAX(revenue) AS max_rev FROM orders"
+      },
+      {
+        "mistake": "Using WIDTH_BUCKET with zero range (min = max)",
+        "what_goes_wrong": "If min = max, WIDTH_BUCKET throws 'division by zero' error because bucket width = (max - min) / num_buckets = 0.",
+        "symptom": "Query fails with 'division by zero' or 'invalid bucket count'.",
+        "bad_sql": "SELECT WIDTH_BUCKET(revenue, 50, 50, 5) FROM orders",
+        "good_sql": "SELECT CASE WHEN min_rev = max_rev THEN 1 ELSE WIDTH_BUCKET(revenue, min_rev, max_rev, 5) END FROM (\n  SELECT MIN(revenue) AS min_rev, MAX(revenue) AS max_rev FROM orders\n) t",
+        "detection_sql": "SELECT MIN(revenue) AS min_rev, MAX(revenue) AS max_rev FROM orders WHERE ...",
+        "handling_sql": "CASE WHEN min_rev = max_rev THEN 1 ELSE WIDTH_BUCKET(...) END"
+      },
+      {
+        "mistake": "Confusing WIDTH_BUCKET with NTILE (equal range vs equal count)",
+        "what_goes_wrong": "WIDTH_BUCKET creates equal-width *ranges* — counts may vary wildly. NTILE creates equal-count *buckets* — ranges may vary. Users expect counts to match but get wide variance.",
+        "symptom": "Histogram shows uneven bars (WIDTH_BUCKET) vs uniform bars (NTILE) — user expected uniform.",
+        "bad_sql": "SELECT WIDTH_BUCKET(revenue, 0, 100, 10) FROM orders",
+        "good_sql": "SELECT NTILE(10) OVER (ORDER BY revenue) FROM orders",
+        "detection_sql": "SELECT bucket, COUNT(*) FROM (\n  SELECT NTILE(10) OVER (ORDER BY revenue) AS bucket FROM orders\n) GROUP BY bucket ORDER BY bucket"
+      },
+      {
+        "mistake": "Using WIDTH_BUCKET without explicit min/max bounds",
+        "what_goes_wrong": "Default min/max (e.g., from MIN(column)) may change daily, causing buckets to shift — histogram bars move, making trends hard to interpret.",
+        "symptom": "Histogram looks different each day — not comparable across time.",
+        "bad_sql": "SELECT WIDTH_BUCKET(revenue, (SELECT MIN(revenue) FROM orders), (SELECT MAX(revenue) FROM orders), 10) FROM orders",
+        "good_sql": "SELECT WIDTH_BUCKET(revenue, 0, 1000, 10) FROM orders",
+        "detection_sql": "SELECT MIN(revenue), MAX(revenue) FROM orders WHERE order_date >= CURRENT_DATE - INTERVAL '7 days'\n-- Compare to previous week\nSELECT MIN(revenue), MAX(revenue) FROM orders WHERE order_date BETWEEN CURRENT_DATE - INTERVAL '14 days' AND CURRENT_DATE - INTERVAL '7 days'"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "WIDTH_BUCKET availability",
+        "duckdb_behavior": "DuckDB supports WIDTH_BUCKET(value, min, max, num_buckets) as a function.",
+        "postgres_behavior": "Postgres does not have WIDTH_BUCKET — it requires manual calculation: FLOOR((value - min) / (max - min + epsilon) * num_buckets) + 1.",
+        "bigquery_behavior": "BigQuery does not have WIDTH_BUCKET — same manual calculation needed.",
+        "safe_alternative": "For Postgres/BigQuery, use: FLOOR((value - min_val) / NULLIF(max_val - min_val, 0) * num_buckets) + 1 AS bucket. Add MIN/MAX in a CTE first."
+      },
+      {
+        "construct": "WIDTH_BUCKET with NULL values",
+        "duckdb_behavior": "WIDTH_BUCKET ignores NULL values — they return NULL, not a bucket.",
+        "postgres_behavior": "Same — NULL propagates.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "COALESCE(value, min_val - 1) or filter NULLs first to avoid losing rows."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants *equal-width* bins (e.g., $0-$10, $10-$20)",
+        "user’s question includes 'bucket by $X', 'equal range', 'fixed-width'",
+        "data range is stable and bounded (min/max known or reasonable)",
+        "visualization needs consistent binning (e.g., dashboard histograms)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants *equal-count* buckets (e.g., 10 buckets with same number of rows)",
+          "use_instead": "stat_percentile_distribution + NTILE",
+          "why": "NTILE creates equal-count buckets; WIDTH_BUCKET creates equal-width buckets"
+        },
+        {
+          "condition": "data is highly skewed with extreme outliers",
+          "use_instead": "stat_iqr_outlier",
+          "why": "IQR-based bucketing is robust to outliers"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "equal width",
+        "bucket by $X",
+        "equal range",
+        "histogram",
+        "fixed-width bins",
+        "WIDTH_BUCKET"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "All values are identical",
+        "what_happens": "WIDTH_BUCKET returns same bucket for all rows (typically bucket 1), but min = max may cause division issues if not handled.",
+        "handling": "Add min/max check: CASE WHEN min = max THEN 1 ELSE WIDTH_BUCKET(...) END."
+      },
+      {
+        "scenario": "Values outside [min, max] range",
+        "what_happens": "WIDTH_BUCKET assigns bucket 0 (underflow) or num_buckets+1 (overflow). These must be handled explicitly.",
+        "handling": "Add CASE WHEN to label underflow/overflow buckets or filter them out if desired."
+      },
+      {
+        "scenario": "num_buckets = 1",
+        "what_happens": "All values go to bucket 1 — no distribution. This is valid but rarely useful.",
+        "handling": "Add row count or variance check before bucketing."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) — WIDTH_BUCKET is a simple arithmetic operation. Fast even on large tables.",
+      "when_slow": "None — WIDTH_BUCKET is very fast. Bottlenecks are usually in pre-aggregation or large intermediate tables.",
+      "optimization_hint": "Compute min/max once in a CTE, then reuse. Avoid recalculating per row. Filter NULLs and extreme outliers before bucketing."
+    }
+  },
+  {
+    "id": "stat_cv_stability",
+    "title": "Coefficient of Variation for Metric Stability",
+    "intent_tags": [
+      "coefficient of variation",
+      "CV",
+      "stability",
+      "variability",
+      "relative variability",
+      "normalized std dev",
+      "σ/μ",
+      "metric volatility",
+      "stability score",
+      "CV score"
+    ],
+    "sql_features": [
+      "stddev",
+      "variance",
+      "avg",
+      "nullif"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "statistical",
+    "when_to_use": [
+      "user wants to compare *variability* across metrics with *different scales* (e.g., revenue vs units sold)",
+      "user’s question includes 'which region has most stable revenue?', 'compare volatility'",
+      "filtering unstable metrics (e.g., 'exclude regions with CV > 50%')",
+      "identifying seasonal or outlier-affected data"
+    ],
+    "when_not_to_use": [
+      "user wants *absolute* variability (e.g., std dev in dollars) — use STDDEV directly",
+      "mean is near zero — CV becomes infinite or undefined",
+      "data is heavily skewed or has outliers — IQR-based measures may be better"
+    ],
+    "related_patterns": [
+      "stat_iqr_outlier",
+      "stat_rolling_zscore",
+      "stat_percentile_distribution",
+      "seg_dynamic_threshold",
+      "agg_safe_division"
+    ],
+    "concept_explanation": {
+      "what_it_does": "CV = STDDEV(x) / AVG(x) × 100%. It measures *relative* variability — how much data spreads around the mean, regardless of scale. A CV of 50% means values typically deviate by half the mean.",
+      "mental_model": "Imagine two cities: City A has average rent $1,000 with STDDEV $200 (CV=20%). City B has average rent $2,000 with STDDEV $300 (CV=15%). City B has higher *absolute* variability ($300 vs $200) but lower *relative* variability.",
+      "key_behavior": "CV assumes mean > 0 and data is ratio-scale. Negative means invert interpretation — use ABS(mean) or absolute CV if direction doesn’t matter."
+    },
+    "template": {
+      "minimal": "-- CV per region\nSELECT\n  region,\n  STDDEV(revenue) AS std_revenue,\n  AVG(revenue) AS avg_revenue,\n  ROUND(STDDEV(revenue) / NULLIF(AVG(revenue), 0) * 100, 2) AS cv_pct\nFROM orders\nGROUP BY region",
+      "realistic": "-- Stability comparison: revenue CV vs order count CV per region\n-- Grain: one row per region\nWITH daily_metrics AS (\n  SELECT\n    c.region,\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue,\n    COUNT(DISTINCT o.order_id) AS order_count\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY c.region, order_date\n),\nregion_stats AS (\n  SELECT\n    region,\n    STDDEV(revenue) AS std_revenue,\n    AVG(revenue) AS avg_revenue,\n    STDDEV(order_count) AS std_orders,\n    AVG(order_count) AS avg_orders\n  FROM daily_metrics\n  GROUP BY region\n)\nSELECT\n  region,\n  ROUND(std_revenue, 2) AS std_revenue,\n  ROUND(avg_revenue, 2) AS avg_revenue,\n  ROUND(std_revenue / NULLIF(avg_revenue, 0) * 100, 2) AS cv_revenue_pct,\n  ROUND(std_orders, 2) AS std_orders,\n  ROUND(avg_orders, 2) AS avg_orders,\n  ROUND(std_orders / NULLIF(avg_orders, 0) * 100, 2) AS cv_orders_pct\nFROM region_stats\nORDER BY cv_revenue_pct ASC",
+      "composable": "-- CV comparison: revenue CV per product, filter to stable products (CV < 30%)\n-- Composes: stat_cv_stability + agg_having_vs_where\nWITH daily_revenue AS (\n  SELECT\n    p.product_id,\n    p.product_name,\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS daily_revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY p.product_id, p.product_name, order_date\n),\nproduct_stats AS (\n  SELECT\n    product_id,\n    product_name,\n    STDDEV(daily_revenue) AS std_rev,\n    AVG(daily_revenue) AS avg_rev\n  FROM daily_revenue\n  GROUP BY product_id, product_name\n)\nSELECT\n  product_id,\n  product_name,\n  ROUND(std_rev, 2) AS std_rev,\n  ROUND(avg_rev, 2) AS avg_rev,\n  ROUND(std_rev / NULLIF(avg_rev, 0) * 100, 2) AS cv_pct\nFROM product_stats\nHAVING ROUND(std_rev / NULLIF(avg_rev, 0) * 100, 2) < 30\nORDER BY avg_rev DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Dividing by zero (AVG = 0 or near-zero)",
+        "what_goes_wrong": "CV = STDDEV / AVG. If AVG is 0, division by zero throws an error. Near-zero AVG (e.g., $0.01) makes CV huge and meaningless.",
+        "symptom": "Query fails with 'division by zero' or returns CV > 10,000% for zero-mean products.",
+        "bad_sql": "SELECT STDDEV(revenue) / AVG(revenue) * 100 FROM orders",
+        "good_sql": "SELECT STDDEV(revenue) / NULLIF(AVG(revenue), 0) * 100 FROM orders",
+        "detection_sql": "SELECT AVG(revenue) FROM orders HAVING AVG(revenue) = 0 OR AVG(revenue) < 0.01"
+      },
+      {
+        "mistake": "Using CV for non-negative metrics without ensuring positivity",
+        "what_goes_wrong": "CV assumes mean > 0. If mean is negative (e.g., profit in loss periods), CV flips sign and misleads — high CV in negative range looks like high stability but isn’t.",
+        "symptom": "CV for 'profit' is 200% during losses — user expects low variability.",
+        "bad_sql": "SELECT STDDEV(profit) / AVG(profit) * 100 FROM orders",
+        "good_sql": "SELECT STDDEV(ABS(profit)) / NULLIF(AVG(ABS(profit)), 0) * 100 FROM orders",
+        "detection_sql": "SELECT MIN(profit), MAX(profit) FROM orders"
+      },
+      {
+        "mistake": "Comparing CV across datasets with different granularities",
+        "what_goes_wrong": "CV on daily data differs from CV on monthly data — daily fluctuations look more variable. Comparing daily CV to monthly CV misleads.",
+        "symptom": "Region A has CV=50% daily, Region B has CV=20% monthly — user thinks B is more stable, but daily B is noisier.",
+        "bad_sql": "SELECT region, STDDEV(revenue) / AVG(revenue) * 100\nFROM orders\nGROUP BY region\n-- vs\nSELECT region, STDDEV(monthly_revenue) / AVG(monthly_revenue) * 100\nFROM monthly_metrics\nGROUP BY region",
+        "good_sql": "SELECT region, STDDEV(rev) / NULLIF(AVG(rev), 0) * 100\nFROM (\n  SELECT region, DATE_TRUNC('month', order_date) AS month, SUM(revenue) AS rev\n  FROM orders\n  GROUP BY region, month\n) t\nGROUP BY region",
+        "detection_sql": "SELECT COUNT(*) FROM orders\nWHERE order_date >= CURRENT_DATE - INTERVAL '30 days'\n-- vs\nSELECT COUNT(*) FROM monthly_metrics\nWHERE month >= CURRENT_DATE - INTERVAL '30 days'"
+      },
+      {
+        "mistake": "Using CV for non-metric data (e.g., counts, categories)",
+        "what_goes_wrong": "CV is for *continuous* metrics. For counts, CV is interpretable but may be less useful than variance. For categories, CV is undefined.",
+        "symptom": "CV computed for 'order_status' (e.g., 'shipped', 'returned') — nonsense value.",
+        "bad_sql": "SELECT STDDEV(status) / AVG(status) * 100 FROM orders",
+        "good_sql": "SELECT status, COUNT(*) FROM orders GROUP BY status",
+        "detection_sql": "SELECT DISTINCT status FROM orders"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "STDDEV vs VARIANCE",
+        "duckdb_behavior": "DuckDB supports STDDEV(x) and VAR(x) — both work for CV.",
+        "postgres_behavior": "Postgres supports STDDEV_POP, STDDEV_SAMP, VAR_POP, VAR_SAMP. Use STDDEV_POP for population CV.",
+        "bigquery_behavior": "BigQuery supports STDDEV and VARIANCE with pop/samp variants.",
+        "safe_alternative": "Use STDDEV for CV. For population standard deviation, use STDDEV_POP if available. Most engines default to sample std dev — consistent across tools."
+      },
+      {
+        "construct": "NULL handling in STDDEV",
+        "duckdb_behavior": "DuckDB’s STDDEV ignores NULLs — same as AVG.",
+        "postgres_behavior": "Same — NULLs are excluded.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "No change needed — STDDEV and AVG handle NULLs consistently. But verify with COUNT(*) vs COUNT(column) to detect NULLs."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to compare *relative* variability across different scales",
+        "user’s question includes 'most stable', 'compare volatility', 'CV'",
+        "mean values are positive and well-separated from zero",
+        "data is continuous (not categorical)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants *absolute* variability (e.g., std dev in dollars)",
+          "use_instead": "stat_stddev",
+          "why": "STDDEV alone gives units (e.g., $50) — CV gives percent (e.g., 10%)"
+        },
+        {
+          "condition": "mean is near zero or data is heavily skewed",
+          "use_instead": "stat_iqr_outlier",
+          "why": "IQR is robust to outliers and doesn’t require mean > 0"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "coefficient of variation",
+        "CV",
+        "stability",
+        "variability",
+        "normalized",
+        "relative std dev"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "All values are identical",
+        "what_happens": "STDDEV = 0, CV = 0% — perfect stability.",
+        "handling": "No issue — CV=0% is correct."
+      },
+      {
+        "scenario": "Mean is very small but positive (e.g., $0.01)",
+        "what_happens": "CV becomes huge (e.g., 500%) — unstable and misleading.",
+        "handling": "Filter out rows where AVG < threshold, or use absolute CV: STDDEV / AVG(ABS(x))."
+      },
+      {
+        "scenario": "Mixed positive/negative values",
+        "what_happens": "Mean may be near zero, causing CV to be large or undefined.",
+        "handling": "Use ABS(x) if direction doesn’t matter, or compute CV separately for gains and losses."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) — STDDEV and AVG require one scan. Fast even on large tables.",
+      "when_slow": "None — CV is a simple aggregate. Bottlenecks are usually in data preparation (joins, filters).",
+      "optimization_hint": "Pre-filter to relevant rows before computing CV. Materialize CV per group in a CTE if reused. Use APPROX functions for very large data."
+    }
+  },
+  {
+    "id": "stat_correlation_regression",
+    "title": "Correlation and Regression in SQL",
+    "intent_tags": [
+      "correlation",
+      "regression",
+      "CORR",
+      "REGR_SLOPE",
+      "REGR_R2",
+      "linear relationship",
+      "trend",
+      "slope",
+      "R-squared",
+      "covariance",
+      "linear regression",
+      "model"
+    ],
+    "sql_features": [
+      "corr",
+      "regr_slope",
+      "regr_r2",
+      "window",
+      "cte"
+    ],
+    "difficulty": "expert",
+    "pattern_type": "statistical",
+    "when_to_use": [
+      "user wants to quantify linear relationship between two metrics (e.g., advertising spend vs revenue)",
+      "user’s question includes 'correlation between X and Y', 'slope of trend line'",
+      "building regression diagnostics (e.g., 'what’s R² for advertising spend?')",
+      "preparing data for predictive modeling (e.g., feature correlation analysis)"
+    ],
+    "when_not_to_use": [
+      "user suspects *non-linear* relationships — correlation only captures linear trends",
+      "data has *outliers* — correlation is sensitive to extremes",
+      "user wants *causation* — correlation ≠ causation (e.g., ice cream sales and drowning deaths both rise in summer)"
+    ],
+    "related_patterns": [
+      "stat_rolling_zscore",
+      "stat_zscore_outlier",
+      "stat_iqr_outlier",
+      "stat_percentile_distribution",
+      "agg_preagg_before_join"
+    ],
+    "concept_explanation": {
+      "what_it_does": "CORR(x, y) measures linear correlation (-1 to 1). REGR_SLOPE(y, x) gives the slope of the best-fit line. REGR_R2 gives R² — proportion of variance explained. All require paired data and detect linear relationships only.",
+      "mental_model": "Imagine a scatterplot. CORR tells you how tightly points cluster around a straight line (1 = perfect line, 0 = no line). REGR_SLOPE tells you how steep that line is.",
+      "key_behavior": "CORR and REGR require paired non-NULL observations. Neither implies causation — confounding variables may drive both metrics."
+    },
+    "template": {
+      "minimal": "-- Correlation and regression between ad_spend and revenue\nSELECT\n  CORR(ad_spend, revenue) AS correlation,\n  REGR_SLOPE(revenue, ad_spend) AS slope,\n  REGR_R2(revenue, ad_spend) AS r_squared\nFROM advertising_metrics",
+      "realistic": "-- Correlation and regression by quarter: ad_spend vs revenue\n-- Grain: one row per quarter\nWITH quarterly AS (\n  SELECT\n    DATE_TRUNC('quarter', date) AS quarter,\n    SUM(ad_spend) AS total_spend,\n    SUM(revenue) AS total_revenue\n  FROM advertising_metrics\n  WHERE date >= CURRENT_DATE - INTERVAL '2 years'\n  GROUP BY 1\n),\nregression AS (\n  SELECT\n    quarter,\n    total_spend,\n    total_revenue,\n    CORR(total_spend, total_revenue) OVER (ORDER BY quarter) AS rolling_corr,\n    REGR_SLOPE(total_revenue, total_spend) OVER (ORDER BY quarter) AS rolling_slope,\n    REGR_R2(total_revenue, total_spend) OVER (ORDER BY quarter) AS rolling_r2\n  FROM quarterly\n)\nSELECT\n  quarter,\n  ROUND(total_spend, 2) AS total_spend,\n  ROUND(total_revenue, 2) AS total_revenue,\n  ROUND(CORR(total_spend, total_revenue) OVER (), 3) AS overall_corr,\n  ROUND(REGR_SLOPE(total_revenue, total_spend) OVER (), 4) AS overall_slope,\n  ROUND(REGR_R2(total_revenue, total_spend) OVER (), 3) AS overall_r2\nFROM quarterly\nORDER BY quarter",
+      "composable": "-- Correlation matrix: spend on TV, radio, online vs revenue\n-- Composes: stat_correlation_regression + seg_case_when_classification\nWITH daily_spend AS (\n  SELECT\n    date,\n    tv_spend,\n    radio_spend,\n    online_spend,\n    revenue\n  FROM advertising_metrics\n  WHERE date >= CURRENT_DATE - INTERVAL '90 days'\n),\nstats AS (\n  SELECT\n    CORR(tv_spend, revenue) AS corr_tv,\n    CORR(radio_spend, revenue) AS corr_radio,\n    CORR(online_spend, revenue) AS corr_online,\n    REGR_SLOPE(revenue, tv_spend) AS slope_tv,\n    REGR_SLOPE(revenue, radio_spend) AS slope_radio,\n    REGR_SLOPE(revenue, online_spend) AS slope_online\n  FROM daily_spend\n)\nSELECT\n  tv_spend,\n  radio_spend,\n  online_spend,\n  revenue,\n  CASE\n    WHEN corr_tv > 0.8 THEN 'strong_tv'\n    WHEN corr_tv > 0.5 THEN 'moderate_tv'\n    ELSE 'weak_tv'\n  END AS tv_strength,\n  CASE\n    WHEN corr_online > 0.8 THEN 'strong_online'\n    WHEN corr_online > 0.5 THEN 'moderate_online'\n    ELSE 'weak_online'\n  END AS online_strength\nFROM daily_spend\nCROSS JOIN stats"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using correlation on non-linear relationships",
+        "what_goes_wrong": "Correlation captures only *linear* relationships. If the true relationship is quadratic (e.g., revenue increases then decreases with ad_spend), correlation may be near zero even though a strong pattern exists.",
+        "symptom": "CORR = 0.05 for ad_spend vs revenue — user expects high correlation, but relationship is U-shaped.",
+        "bad_sql": "SELECT CORR(ad_spend, revenue) FROM advertising",
+        "good_sql": "SELECT ad_spend, revenue FROM advertising ORDER BY ad_spend",
+        "detection_sql": "SELECT ad_spend, revenue FROM advertising ORDER BY ad_spend LIMIT 100",
+        "handling_sql": "If trend is non-linear, transform variables (e.g., LOG(ad_spend)) or use non-linear models."
+      },
+      {
+        "mistake": "Ignoring outliers in correlation calculation",
+        "what_goes_wrong": "A single outlier (e.g., one day with $1M revenue) can inflate correlation from 0.2 to 0.8 — misleadingly strong.",
+        "symptom": "CORR jumps from 0.2 to 0.8 after adding one row — not robust.",
+        "bad_sql": "SELECT CORR(ad_spend, revenue) FROM advertising",
+        "good_sql": "WITH cleaned AS (\n  SELECT ad_spend, revenue\n  FROM advertising\n  WHERE revenue BETWEEN 100 AND 10000\n)\nSELECT CORR(ad_spend, revenue) FROM cleaned",
+        "detection_sql": "SELECT MIN(revenue), MAX(revenue), STDDEV(revenue) FROM advertising",
+        "handling_sql": "Use IQR or Z-score to filter outliers before correlation, or use robust correlation methods (e.g., Spearman)."
+      },
+      {
+        "mistake": "Confusing correlation with causation",
+        "what_goes_wrong": "High correlation doesn’t imply causation. Ice cream sales and drowning deaths are correlated (both summer-driven), but one doesn’t cause the other.",
+        "symptom": "User concludes 'ad_spend increases revenue' from CORR=0.8, but other factors (seasonality, competition) may drive both.",
+        "bad_sql": "SELECT CORR(ad_spend, revenue) FROM advertising",
+        "good_sql": "SELECT ad_spend, revenue, date FROM advertising ORDER BY date",
+        "detection_sql": "SELECT COUNT(*) FROM advertising WHERE date IS NULL",
+        "handling_sql": "Add confounder variables, use time-series models, or conduct A/B tests to establish causation."
+      },
+      {
+        "mistake": "Using REGR functions on unpaired data",
+        "what_goes_wrong": "CORR and REGR require *paired* observations. If ad_spend and revenue are in separate tables, joining without a common key creates spurious correlations.",
+        "symptom": "CORR = 1.0 for ad_spend vs revenue — but they’re from different tables (Cartesian product).",
+        "bad_sql": "SELECT CORR(a.ad_spend, r.revenue) FROM ad_spend a, revenue r",
+        "good_sql": "SELECT CORR(a.ad_spend, r.revenue)\nFROM ad_spend a\nJOIN revenue r ON a.date = r.date",
+        "detection_sql": "SELECT COUNT(*) FROM ad_spend a, revenue r\nSELECT COUNT(*) FROM ad_spend JOIN revenue ON ad_spend.date = revenue.date",
+        "handling_sql": "Always join on a common key (e.g., date, customer_id) to ensure paired observations."
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "REGR_SLOPE availability",
+        "duckdb_behavior": "DuckDB supports CORR, REGR_SLOPE, REGR_R2 as aggregate functions.",
+        "postgres_behavior": "Postgres supports CORR, REGR_SLOPE, REGR_R2 in PostGIS and standard SQL. Works as expected.",
+        "bigquery_behavior": "BigQuery supports CORR, but REGR_SLOPE/REGR_R2 require regression models (e.g., ML.REGRESS).",
+        "safe_alternative": "For BigQuery, use ML.REGRESS for full regression. For simple slope, compute manually: REGR_SLOPE = (COUNT * SUM(x*y) - SUM(x)*SUM(y)) / (COUNT * SUM(x^2) - SUM(x)^2)."
+      },
+      {
+        "construct": "NULL handling in correlation",
+        "duckdb_behavior": "CORR ignores rows where either x or y is NULL — only paired non-NULL values are used.",
+        "postgres_behavior": "Same — NULLs excluded.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Verify NULL counts match: COUNT(*) vs COUNT(x), COUNT(y). Filter NULLs if expected (e.g., WHERE x IS NOT NULL AND y IS NOT NULL)."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to *quantify linear relationship* between two continuous variables",
+        "user’s question includes 'correlation', 'slope', 'R-squared', 'regression'",
+        "data is paired (same row has both x and y)",
+        "exploratory analysis is needed before modeling"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants *non-linear* relationship or robustness to outliers",
+          "use_instead": "stat_iqr_outlier",
+          "why": "Spearman correlation or IQR-based methods are more robust"
+        },
+        {
+          "condition": "user needs *causation* (not just correlation)",
+          "use_instead": "stat_ab_test",
+          "why": "A/B tests or causal inference models establish causation"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "correlation",
+        "slope",
+        "R-squared",
+        "regression",
+        "linear relationship",
+        "trend line"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "All x or all y values are identical",
+        "what_happens": "Variance is zero — slope and correlation are undefined (division by zero).",
+        "handling": "Filter rows where variance is non-zero, or return NULL if slope is undefined."
+      },
+      {
+        "scenario": "Very small sample size (n < 3)",
+        "what_happens": "CORR and REGR may return NULL or unstable values. R² can be 1.0 with just 2 points.",
+        "handling": "Add minimum sample size check: HAVING COUNT(*) >= 3."
+      },
+      {
+        "scenario": "Outliers in both x and y",
+        "what_happens": "Correlation may be artificially inflated — both variables move together due to shared outliers.",
+        "handling": "Use robust methods (e.g., Spearman correlation) or Winsorize extreme values."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) — correlation and regression require one scan for sums and cross-products.",
+      "when_slow": "None — correlation is fast. Bottlenecks are usually in data preparation (joins, filters).",
+      "optimization_hint": "Pre-filter to relevant rows before correlation. Materialize paired data in a CTE. For rolling correlation, use windowed CORR."
+    }
+  },
+  {
+    "id": "stat_moving_average",
+    "title": "Moving Average with Correct Frame",
+    "intent_tags": [
+      "moving average",
+      "SMA",
+      "rolling average",
+      "trailing average",
+      "window moving average",
+      "frame specification",
+      "warm-up period",
+      "SMA5",
+      "SMA20",
+      "simple moving average"
+    ],
+    "sql_features": [
+      "window",
+      "avg_over",
+      "rows_between",
+      "cte"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "statistical",
+    "when_to_use": [
+      "user wants to smooth noisy data with a simple moving average (e.g., daily revenue smoothed over 7 days)",
+      "user’s question includes '7-day moving average', 'rolling average'",
+      "building trend indicators (e.g., 'price moving average' in dashboards)",
+      "detecting anomalies relative to recent history"
+    ],
+    "when_not_to_use": [
+      "user wants *exponential* moving average (EMA) — SMA treats all points equally, EMA weights recent points more",
+      "user needs *centered* moving average (e.g., for smoothing peaks) — this requires looking ahead and behind",
+      "user wants to avoid *warm-up period* (first N rows have incomplete averages)"
+    ],
+    "related_patterns": [
+      "stat_rolling_zscore",
+      "stat_zscore_outlier",
+      "stat_iqr_outlier",
+      "stat_percentile_distribution",
+      "wf_sliding_window"
+    ],
+    "concept_explanation": {
+      "what_it_does": "AVG(column) OVER (ORDER BY date ROWS BETWEEN N PRECEDING AND CURRENT ROW) computes a simple moving average (SMA) over the last N+1 rows. It’s a 'trailing' average — the current row is included in the average. The frame defines which rows contribute to each average.",
+      "mental_model": "Imagine dragging a window of fixed size across time — each day, the window moves one day forward, and the average is computed over the days currently inside the window.",
+      "key_behavior": "SMA includes current row in the window. For 'previous N days excluding today', use ROWS BETWEEN N PRECEDING AND 1 PRECEDING."
+    },
+    "template": {
+      "minimal": "-- 7-day moving average of revenue\nSELECT\n  order_date,\n  revenue,\n  AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS sma_7d\nFROM daily_revenue",
+      "realistic": "-- Daily revenue with 7-day and 30-day moving averages, and anomaly flags\n-- Grain: one row per day\nWITH daily_revenue AS (\n  SELECT\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY 1\n),\nwith_ma AS (\n  SELECT\n    order_date,\n    revenue,\n    AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS sma_7d,\n    AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) AS sma_30d\n  FROM daily_revenue\n)\nSELECT\n  order_date,\n  revenue,\n  sma_7d,\n  sma_30d,\n  CASE\n    WHEN revenue > 2 * sma_7d THEN 'spike'\n    WHEN revenue < 0.5 * sma_7d THEN 'dip'\n    ELSE 'normal'\n  END AS flag\nFROM with_ma",
+      "composable": "-- 7-day moving average, then compare to 30-day moving average for trend detection\n-- Composes: stat_moving_average + stat_zscore_outlier\nWITH daily_revenue AS (\n  SELECT\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY 1\n),\nwith_ma AS (\n  SELECT\n    order_date,\n    revenue,\n    AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS sma_7d,\n    AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) AS sma_30d\n  FROM daily_revenue\n)\nSELECT\n  order_date,\n  revenue,\n  sma_7d,\n  sma_30d,\n  CASE\n    WHEN sma_7d > 1.2 * sma_30d THEN 'accelerating'\n    WHEN sma_7d < 0.8 * sma_30d THEN 'decelerating'\n    ELSE 'stable'\n  END AS trend_status\nFROM with_ma"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Missing ORDER BY in window specification",
+        "what_goes_wrong": "Without ORDER BY, the window has no defined ordering — the moving average becomes arbitrary. Results may change between executions.",
+        "symptom": "SMA values jump around or change on re-runs — not deterministic.",
+        "bad_sql": "SELECT AVG(revenue) OVER (ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) FROM daily_revenue",
+        "good_sql": "SELECT AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) FROM daily_revenue",
+        "detection_sql": "SELECT order_date, AVG(revenue) OVER (ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS sma_7d\nFROM daily_revenue\nORDER BY order_date",
+        "handling_sql": "Always add ORDER BY to moving averages: OVER (ORDER BY date ROWS BETWEEN N PRECEDING AND CURRENT ROW)."
+      },
+      {
+        "mistake": "Confusing ROWS vs RANGE for date-based windows",
+        "what_goes_wrong": "ROWS BETWEEN counts *rows*, not *days*. If data has gaps (e.g., weekends), a 7-day SMA may span 10 calendar days. RANGE between 6 PRECEDING AND CURRENT ROW doesn’t work with DATE in DuckDB/Postgres.",
+        "symptom": "7-day SMA sometimes spans 10+ days during weekends — not the intended window.",
+        "bad_sql": "SELECT AVG(revenue) OVER (ORDER BY order_date RANGE BETWEEN 6 PRECEDING AND CURRENT ROW) FROM daily_revenue",
+        "good_sql": "SELECT AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) FROM daily_revenue",
+        "detection_sql": "SELECT order_date, COUNT(*) FROM daily_revenue GROUP BY 1 HAVING COUNT(*) > 1"
+      },
+      {
+        "mistake": "Ignoring warm-up period (first N rows have incomplete averages)",
+        "what_goes_wrong": "The first 6 days of a 7-day SMA have fewer than 7 rows — average is based on incomplete data and may be misleading.",
+        "symptom": "SMA for first 6 days is unstable — user wants complete 7-day averages only.",
+        "bad_sql": "SELECT AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) FROM daily_revenue",
+        "good_sql": "SELECT order_date, revenue,\n       AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS sma_7d\nFROM daily_revenue\nWHERE ROW_NUMBER() OVER (ORDER BY order_date) > 6",
+        "detection_sql": "SELECT ROW_NUMBER() OVER (ORDER BY order_date), COUNT(*) FROM daily_revenue GROUP BY 1 HAVING ROW_NUMBER() <= 6"
+      },
+      {
+        "mistake": "Using moving average on non-monotonic time series",
+        "what_goes_wrong": "If order_date has duplicates or is not monotonically increasing (e.g., batch loads with out-of-order timestamps), the moving average may include future values.",
+        "symptom": "SMA dips when revenue should be rising — 'future' values are averaged into past averages.",
+        "bad_sql": "SELECT AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) FROM daily_revenue",
+        "good_sql": "SELECT order_date, revenue,\n       AVG(revenue) OVER (ORDER BY order_date, order_id ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS sma_7d\nFROM daily_revenue\nORDER BY order_date, order_id",
+        "detection_sql": "SELECT order_date, COUNT(*) FROM daily_revenue GROUP BY 1 HAVING COUNT(*) > 1"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "RANGE with DATE in DuckDB/Postgres",
+        "duckdb_behavior": "RANGE BETWEEN 6 PRECEDING AND CURRENT ROW fails with DATE — DuckDB only supports RANGE for numeric/integer ORDER BY columns.",
+        "postgres_behavior": "Same — RANGE requires numeric/interval ORDER BY, not DATE.",
+        "bigquery_behavior": "Same — RANGE only works with numeric or integer.",
+        "safe_alternative": "Use ROWS for row-based windows. For time-based windows, pre-fill date gaps with generate_series or use a date spine."
+      },
+      {
+        "construct": "DEFAULT frame when ORDER BY is present",
+        "duckdb_behavior": "DuckDB defaults to ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW for ORDER BY — this creates cumulative sum, not moving average. For SMA, explicit frame is needed.",
+        "postgres_behavior": "Same — default is cumulative unless specified.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Always specify frame explicitly: ROWS BETWEEN N PRECEDING AND CURRENT ROW for SMA. Avoid relying on defaults."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants *trailing* SMA (includes current row) for smoothing",
+        "user’s question includes 'rolling average', '7-day SMA', 'moving average'",
+        "data is dense (few gaps) and row-based windowing is acceptable",
+        "performance matters — SMA is O(n) and fast"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants *exponential* moving average (EMA) with weighted recent points",
+          "use_instead": "stat_ema_proxy",
+          "why": "EMA weights recent points more; SMA treats all points equally"
+        },
+        {
+          "condition": "user wants *centered* moving average (look ahead and behind)",
+          "use_instead": "stat_centered_ma",
+          "why": "Centered MA uses both leading and trailing rows; trailing MA only uses trailing"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "rolling average",
+        "moving average",
+        "SMA",
+        "7-day average",
+        "trailing",
+        "smoothing"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "First N rows have incomplete window",
+        "what_happens": "Average is computed over fewer than N rows — may be noisy or misleading.",
+        "handling": "Filter warm-up rows: WHERE ROW_NUMBER() > N. Or use COALESCE to set default values."
+      },
+      {
+        "scenario": "Date gaps (e.g., weekends)",
+        "what_happens": "7-day SMA may span 10 calendar days — row count ≠ time window.",
+        "handling": "Generate a dense date spine and LEFT JOIN to fill gaps. Then SMA counts only business days."
+      },
+      {
+        "scenario": "Duplicate timestamps",
+        "what_happens": "ORDER BY with ties may include 'future' rows in average — non-deterministic ordering.",
+        "handling": "Add tiebreaker: ORDER BY date, order_id or ORDER BY date, ROW_NUMBER()."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for sort, O(n) for SMA scan. Dominated by sort cost.",
+      "when_slow": "Very large datasets (>10M rows) with complex ORDER BY or high-partition counts.",
+      "optimization_hint": "Pre-filter to relevant date range before SMA. Materialize pre-aggregated daily data in a CTE. For rolling windows, consider incremental updates."
+    }
+  },
+  {
+    "id": "stat_zscore_outlier",
+    "title": "Z-Score Outlier Detection",
+    "intent_tags": [
+      "z-score",
+      "outlier",
+      "anomaly",
+      "standard deviation",
+      "statistical outlier",
+      "3-sigma",
+      "normal distribution",
+      "standard score",
+      "anomaly detection",
+      "deviation"
+    ],
+    "sql_features": [
+      "stddev",
+      "avg",
+      "nullif",
+      "window",
+      "cte"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "statistical",
+    "when_to_use": [
+      "user wants to flag data points that deviate significantly from the mean (e.g., revenue anomalies)",
+      "user’s question includes 'z-score', 'outlier detection', 'anomaly score'",
+      "validating data quality (e.g., 'is this order value plausible?')",
+      "building anomaly alerts (e.g., 'flag z-score > 3')"
+    ],
+    "when_not_to_use": [
+      "data is not approximately normally distributed — z-scores assume Gaussian distribution",
+      "data has heavy tails or many outliers — z-score sensitivity amplifies noise",
+      "user wants *robust* outlier detection — use IQR-based methods instead"
+    ],
+    "related_patterns": [
+      "stat_iqr_outlier",
+      "stat_rolling_zscore",
+      "stat_percentile_distribution",
+      "stat_moving_average",
+      "seg_dynamic_threshold"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Z-score = (value - mean) / std_dev. It measures how many standard deviations a value is from the mean. |z| > 3 is a common anomaly threshold — implies the value is in the top/bottom 0.3% of a normal distribution.",
+      "mental_model": "Imagine a bell curve. Z-score tells you how far a point is from the peak in 'standard deviation units'. Z=2 means 2 standard deviations above average.",
+      "key_behavior": "Z-score assumes normal distribution. For skewed data, IQR-based methods are more robust. Z=0 means the value equals the mean."
+    },
+    "template": {
+      "minimal": "-- Z-score for revenue\nSELECT\n  order_id,\n  revenue,\n  (revenue - AVG(revenue) OVER ()) / NULLIF(STDDEV(revenue) OVER (), 0) AS z_score\nFROM orders",
+      "realistic": "-- Z-score outlier detection per region, with flagging\n-- Grain: one row per order with z-score\nWITH order_metrics AS (\n  SELECT\n    c.region,\n    o.order_id,\n    oi.quantity * oi.unit_price AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n),\nregion_stats AS (\n  SELECT region, AVG(revenue) AS avg_rev, STDDEV(revenue) AS std_rev\n  FROM order_metrics\n  GROUP BY region\n),\nwith_zscore AS (\n  SELECT\n    om.region,\n    om.order_id,\n    om.revenue,\n    (om.revenue - rs.avg_rev) / NULLIF(rs.std_rev, 0) AS z_score\n  FROM order_metrics om\n  JOIN region_stats rs ON om.region = rs.region\n)\nSELECT\n  region,\n  order_id,\n  revenue,\n  ROUND(z_score, 2) AS z_score,\n  CASE\n    WHEN ABS(z_score) > 3 THEN 'outlier'\n    WHEN ABS(z_score) > 2 THEN 'moderate'\n    ELSE 'normal'\n  END AS status\nFROM with_zscore\nORDER BY ABS(z_score) DESC\nLIMIT 100",
+      "composable": "-- Z-score per customer, then flag customers with >20% outliers\n-- Composes: stat_zscore_outlier + agg_count\nWITH order_metrics AS (\n  SELECT\n    c.customer_id,\n    o.order_id,\n    oi.quantity * oi.unit_price AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n),\ncustomer_stats AS (\n  SELECT\n    customer_id,\n    AVG(revenue) AS avg_rev,\n    STDDEV(revenue) AS std_rev\n  FROM order_metrics\n  GROUP BY customer_id\n),\nwith_zscore AS (\n  SELECT\n    om.customer_id,\n    om.order_id,\n    om.revenue,\n    (om.revenue - cs.avg_rev) / NULLIF(cs.std_rev, 0) AS z_score\n  FROM order_metrics om\n  JOIN customer_stats cs ON om.customer_id = cs.customer_id\n),\ncustomer_outlier_rate AS (\n  SELECT\n    customer_id,\n    COUNT(*) AS order_count,\n    COUNT(*) FILTER (WHERE ABS(z_score) > 3) AS outlier_count,\n    ROUND(COUNT(*) FILTER (WHERE ABS(z_score) > 3) * 100.0 / COUNT(*), 2) AS outlier_pct\n  FROM with_zscore\n  GROUP BY customer_id\n)\nSELECT * FROM customer_outlier_rate\nWHERE outlier_pct > 20\nORDER BY outlier_pct DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using z-score without checking normality assumption",
+        "what_goes_wrong": "Z-scores assume Gaussian distribution. For highly skewed data (e.g., power-law distributions), z > 3 may be normal, not anomalous.",
+        "symptom": "Most values flagged as outliers — distribution isn’t Gaussian, z-score over-flags.",
+        "bad_sql": "SELECT (revenue - AVG(revenue) OVER ()) / STDDEV(revenue) OVER () AS z_score FROM orders",
+        "good_sql": "SELECT revenue FROM orders ORDER BY revenue LIMIT 100",
+        "detection_sql": "SELECT AVG(revenue) AS mean, STDDEV(revenue) AS std, MIN(revenue) AS min, MAX(revenue) AS max FROM orders",
+        "handling_sql": "If distribution is skewed, log-transform (e.g., LOG(revenue)) or use IQR-based methods."
+      },
+      {
+        "mistake": "Using population mean/stddev instead of group-specific",
+        "what_goes_wrong": "Global z-score mixes multiple groups (e.g., all customers). If one customer has high variance, their orders are flagged as outliers even if normal for them.",
+        "symptom": "Customers with high-volume orders flagged as outliers — z-score is global, not per-customer.",
+        "bad_sql": "SELECT (revenue - AVG(revenue) OVER ()) / STDDEV(revenue) OVER () FROM orders",
+        "good_sql": "SELECT (revenue - AVG(revenue) OVER (PARTITION BY customer_id)) / STDDEV(revenue) OVER (PARTITION BY customer_id) FROM orders",
+        "detection_sql": "SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id HAVING COUNT(*) > 100"
+      },
+      {
+        "mistake": "Division by zero (STDDEV = 0)",
+        "what_goes_wrong": "If all values in a group are identical (e.g., all orders = $10), STDDEV = 0, causing division by zero.",
+        "symptom": "Query fails with 'division by zero' or returns NULL for z-score.",
+        "bad_sql": "SELECT (revenue - AVG(revenue) OVER ()) / STDDEV(revenue) OVER () FROM orders",
+        "good_sql": "SELECT (revenue - AVG(revenue) OVER ()) / NULLIF(STDDEV(revenue) OVER (), 0) FROM orders",
+        "detection_sql": "SELECT customer_id, STDDEV(revenue) FROM orders GROUP BY customer_id HAVING STDDEV(revenue) = 0"
+      },
+      {
+        "mistake": "Confusing z-score with percentile",
+        "what_goes_wrong": "Z-score is not a percentile. z = 1.96 corresponds to ~97.5th percentile, not 96%. Users may misinterpret z = 2 as '95%ile' (it’s actually ~97.7%).",
+        "symptom": "User expects z > 2 to flag top 5% of data, but it flags ~2.3% (two-tailed).",
+        "bad_sql": "SELECT * FROM orders WHERE ABS(z_score) > 2",
+        "good_sql": "SELECT * FROM orders WHERE revenue > PERCENTILE_CONT(0.975) WITHIN GROUP (ORDER BY revenue)",
+        "detection_sql": "SELECT COUNT(*) FROM orders WHERE ABS(z_score) > 2",
+        "handling_sql": "For percentile-based flags, use PERCENTILE_CONT or PERCENT_RANK. Z-scores are for standard deviations, not percentiles."
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "STDDEV vs VARIANCE in z-score",
+        "duckdb_behavior": "DuckDB supports STDDEV(x) — sqrt of variance. Z-score = (x - mean) / stddev.",
+        "postgres_behavior": "Same — use STDDEV for z-score.",
+        "bigquery_behavior": "BigQuery supports STDDEV — same formula.",
+        "safe_alternative": "Always use STDDEV for z-score, not VARIANCE. Z = (x - μ) / σ, where σ = STDDEV."
+      },
+      {
+        "construct": "NULL handling in z-score",
+        "duckdb_behavior": "NULL values in revenue return NULL z-score — same as other aggregates.",
+        "postgres_behavior": "Same — NULL propagates.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "COALESCE(revenue, 0) or filter NULLs before z-score if NULLs are unexpected."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to flag *statistical outliers* based on deviation from mean",
+        "user’s question includes 'z-score', 'anomaly score', 'standard deviation'",
+        "data is approximately normally distributed",
+        "user needs *absolute* thresholds (e.g., z > 3)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "data is highly skewed or has heavy outliers",
+          "use_instead": "stat_iqr_outlier",
+          "why": "IQR is robust to outliers; z-score assumes normality"
+        },
+        {
+          "condition": "user wants percentile-based thresholds (e.g., top 5%)",
+          "use_instead": "stat_percentile_distribution",
+          "why": "Percentiles are easier to interpret than z-scores for business users"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "z-score",
+        "anomaly score",
+        "standard deviation",
+        "outlier detection",
+        "statistical outlier"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "All values are identical",
+        "what_happens": "STDDEV = 0, z-score is NULL — no variability to measure.",
+        "handling": "Filter out groups with STDDEV = 0, or use COALESCE to set z-score = 0."
+      },
+      {
+        "scenario": "Small sample size (n < 5)",
+        "what_happens": "Z-score is unstable — one outlier can inflate STDDEV, masking others.",
+        "handling": "Add minimum sample size check: HAVING COUNT(*) >= 5."
+      },
+      {
+        "scenario": "High-cardinality groups",
+        "what_happens": "Z-score per group may have low precision if groups have few rows.",
+        "handling": "Use pooled std dev across groups, or aggregate to higher granularity first."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) — AVG and STDDEV require one scan. Z-score is O(1) per row.",
+      "when_slow": "None — z-score is fast. Bottlenecks are usually in data preparation.",
+      "optimization_hint": "Pre-filter to relevant rows before z-score. Materialize group stats in a CTE if reused. For rolling z-score, use windowed AVG/STDDEV."
+    }
+  },
+  {
+    "id": "stat_rolling_zscore",
+    "title": "Rolling Z-Score for Time Series Anomalies",
+    "intent_tags": [
+      "rolling z-score",
+      "time series anomaly",
+      "rolling anomaly",
+      "time-based z-score",
+      "dynamic threshold",
+      "temporal outlier",
+      "rolling standard deviation",
+      "moving z-score",
+      "window z-score"
+    ],
+    "sql_features": [
+      "window",
+      "avg_over",
+      "stddev_over",
+      "nullif",
+      "cte"
+    ],
+    "difficulty": "advanced",
+    "pattern_type": "statistical",
+    "when_to_use": [
+      "user wants to detect anomalies in time series data (e.g., daily revenue anomalies) where the baseline changes over time",
+      "user’s question includes 'rolling z-score', 'time-based anomaly', 'dynamic threshold'",
+      "building real-time alerting (e.g., 'flag today’s revenue if it deviates from 7-day rolling baseline')",
+      "validating recent trends without global mean (e.g., seasonality-aware anomaly detection)"
+    ],
+    "when_not_to_use": [
+      "user wants *static* z-score (fixed mean/std dev) — use stat_zscore_outlier instead",
+      "data has gaps or irregular spacing — rolling windows assume continuous time",
+      "user needs *global* baseline — static z-score is simpler and more stable"
+    ],
+    "related_patterns": [
+      "stat_zscore_outlier",
+      "stat_iqr_outlier",
+      "stat_percentile_distribution",
+      "stat_moving_average",
+      "seg_dynamic_threshold"
+    ],
+    "concept_explanation": {
+      "what_it_does": "Rolling z-score = (current_value - rolling_mean) / rolling_stddev. It uses a trailing window (e.g., last 7 days) to compute a dynamic baseline. Current value is *excluded* from the baseline to avoid bias (e.g., rows BETWEEN 6 PRECEDING AND 1 PRECEDING).",
+      "mental_model": "Imagine a rolling window that slides across time. For each day, the window shows the last 7 days’ data, but the baseline (mean/std) is computed from those 7 days *excluding today* to avoid self-influence.",
+      "key_behavior": "Rolling z-score must exclude current row from baseline to avoid bias. Using CURRENT ROW in the window inflates std dev and masks outliers."
+    },
+    "template": {
+      "minimal": "-- Rolling 7-day z-score for revenue (exclude current row from baseline)\nSELECT\n  order_date,\n  revenue,\n  AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS rolling_mean,\n  STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS rolling_std,\n  (revenue - AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING))\n    / NULLIF(STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING), 0) AS rolling_z_score\nFROM daily_revenue",
+      "realistic": "-- Rolling 7-day z-score for daily revenue, with anomaly flags\n-- Grain: one row per day with rolling z-score\nWITH daily_revenue AS (\n  SELECT\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY 1\n),\nwith_rolling AS (\n  SELECT\n    order_date,\n    revenue,\n    AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS rolling_mean,\n    STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS rolling_std\n  FROM daily_revenue\n),\nwith_zscore AS (\n  SELECT\n    order_date,\n    revenue,\n    rolling_mean,\n    rolling_std,\n    (revenue - rolling_mean) / NULLIF(rolling_std, 0) AS rolling_z_score\n  FROM with_rolling\n)\nSELECT\n  order_date,\n  revenue,\n  rolling_mean,\n  rolling_std,\n  ROUND(rolling_z_score, 2) AS rolling_z_score,\n  CASE\n    WHEN rolling_z_score > 3 THEN 'above_upper'\n    WHEN rolling_z_score < -3 THEN 'below_lower'\n    ELSE 'normal'\n  END AS anomaly_flag\nFROM with_zscore\nWHERE rolling_mean IS NOT NULL  -- exclude first 7 rows (warm-up)\nORDER BY order_date DESC\nLIMIT 100",
+      "composable": "-- Rolling 7-day z-score, then compare to fixed percentile thresholds\n-- Composes: stat_rolling_zscore + stat_percentile_distribution\nWITH daily_revenue AS (\n  SELECT\n    DATE_TRUNC('day', o.order_date) AS order_date,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY 1\n),\npercentiles AS (\n  SELECT\n    PERCENTILE_CONT(0.05) WITHIN GROUP (ORDER BY revenue) AS p5_rev,\n    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY revenue) AS p95_rev\n  FROM daily_revenue\n),\nwith_rolling AS (\n  SELECT\n    order_date,\n    revenue,\n    AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS rolling_mean,\n    STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) AS rolling_std\n  FROM daily_revenue\n),\nwith_zscore AS (\n  SELECT\n    order_date,\n    revenue,\n    (revenue - rolling_mean) / NULLIF(rolling_std, 0) AS rolling_z_score\n  FROM with_rolling\n)\nSELECT\n  w.order_date,\n  w.revenue,\n  ROUND(w.rolling_z_score, 2) AS rolling_z_score,\n  p.p5_rev,\n  p.p95_rev,\n  CASE\n    WHEN w.revenue < p.p5_rev THEN 'below_5p'\n    WHEN w.revenue > p.p95_rev THEN 'above_95p'\n    WHEN w.rolling_z_score > 3 THEN 'rolling_z_high'\n    WHEN w.rolling_z_score < -3 THEN 'rolling_z_low'\n    ELSE 'normal'\n  END AS status\nFROM with_zscore w\nCROSS JOIN percentiles p\nWHERE w.rolling_mean IS NOT NULL\nORDER BY w.order_date DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Including current row in baseline (biasing the z-score)",
+        "what_goes_wrong": "If current value is included in rolling_mean/rolling_std, high or low values inflate their own baseline — z-score becomes near zero even for anomalies.",
+        "symptom": "All z-scores near zero — anomalies are masked because current value defines the baseline.",
+        "bad_sql": "SELECT (revenue - AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)) / STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) FROM daily_revenue",
+        "good_sql": "SELECT (revenue - AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)) / STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) FROM daily_revenue",
+        "detection_sql": "SELECT order_date, revenue,\n       (revenue - AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)) / NULLIF(STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING), 0) AS z_score\nFROM daily_revenue\nWHERE order_date >= CURRENT_DATE - INTERVAL '7 days'",
+        "handling_sql": "Always exclude current row from rolling window: ROWS BETWEEN N PRECEDING AND 1 PRECEDING, not CURRENT ROW."
+      },
+      {
+        "mistake": "Missing ORDER BY in window specification",
+        "what_goes_wrong": "Without ORDER BY, the rolling window has no time-based ordering — z-score uses arbitrary order, often causing false positives/negatives.",
+        "symptom": "Z-scores jump around or are unrelated to actual time sequence.",
+        "bad_sql": "SELECT (revenue - AVG(revenue) OVER (ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)) / STDDEV(revenue) OVER (ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) FROM daily_revenue",
+        "good_sql": "SELECT (revenue - AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)) / STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) FROM daily_revenue",
+        "detection_sql": "SELECT order_date, revenue,\n       (revenue - AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)) / NULLIF(STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING), 0) AS z_score\nFROM daily_revenue\nORDER BY order_date"
+      },
+      {
+        "mistake": "Ignoring warm-up period (first N rows have incomplete baseline)",
+        "what_goes_wrong": "The first 6 days have fewer than 6 previous rows — baseline is noisy and unreliable. Flagging them as anomalies is misleading.",
+        "symptom": "First 6 days flagged as outliers — warm-up period has incomplete data.",
+        "bad_sql": "SELECT * FROM with_zscore WHERE ABS(z_score) > 3",
+        "good_sql": "SELECT * FROM with_zscore WHERE rolling_mean IS NOT NULL AND ABS(z_score) > 3",
+        "detection_sql": "SELECT order_date, ROW_NUMBER() OVER (ORDER BY order_date) AS rn\nFROM daily_revenue\nORDER BY order_date\nLIMIT 10",
+        "handling_sql": "Filter warm-up rows: WHERE rolling_mean IS NOT NULL or WHERE ROW_NUMBER() > N."
+      },
+      {
+        "mistake": "Confusing rolling z-score with static z-score",
+        "what_goes_wrong": "Rolling z-score uses *dynamic* baseline (changes daily), while static uses *fixed* global mean/std dev. Users may misinterpret rolling z-score as 'deviation from overall mean'.",
+        "symptom": "User compares rolling z-scores across days and expects consistency, but baseline shifts daily.",
+        "bad_sql": "SELECT (revenue - AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)) / STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING) FROM orders\n-- Static z-score:\nSELECT (revenue - AVG(revenue) OVER ()) / STDDEV(revenue) OVER () FROM orders",
+        "good_sql": "SELECT revenue,\n       (revenue - AVG(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING)) / NULLIF(STDDEV(revenue) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING), 0) AS rolling_z,\n       (revenue - AVG(revenue) OVER ()) / NULLIF(STDDEV(revenue) OVER (), 0) AS static_z\nFROM orders\nORDER BY order_date",
+        "detection_sql": "SELECT COUNT(*) FROM orders",
+        "handling_sql": "For rolling z-score, always clarify it’s time-based. For static, use OVER () without ORDER BY."
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "Window frame for rolling z-score",
+        "duckdb_behavior": "DuckDB supports ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING for excluding current row.",
+        "postgres_behavior": "Same — frame syntax is standard.",
+        "bigquery_behavior": "Same — ROWS BETWEEN N PRECEDING AND 1 PRECEDING works.",
+        "safe_alternative": "Always specify frame explicitly to exclude current row. Avoid using CURRENT ROW in rolling z-score windows."
+      },
+      {
+        "construct": "NULL handling in rolling z-score",
+        "duckdb_behavior": "NULL values in revenue return NULL rolling_z_score — same as other aggregates.",
+        "postgres_behavior": "Same — NULL propagates.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "COALESCE(revenue, 0) or filter NULLs before rolling z-score if NULLs are unexpected."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to detect *time-based* anomalies with dynamic baseline",
+        "user’s question includes 'rolling z-score', 'time series anomaly', 'dynamic threshold'",
+        "data is continuous (no gaps) and time-ordered",
+        "user needs to avoid global baseline (e.g., seasonality-aware)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants *static* baseline (fixed mean/std dev)",
+          "use_instead": "stat_zscore_outlier",
+          "why": "Static z-score is simpler and more stable for fixed baselines"
+        },
+        {
+          "condition": "data has gaps or irregular spacing",
+          "use_instead": "stat_iqr_outlier",
+          "why": "IQR is less sensitive to gaps; rolling windows assume continuity"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "rolling z-score",
+        "time series anomaly",
+        "dynamic threshold",
+        "time-based anomaly",
+        "moving z-score"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "First N rows have incomplete baseline",
+        "what_happens": "Rolling z-score is NULL or noisy — baseline has fewer than N previous rows.",
+        "handling": "Filter warm-up rows: WHERE rolling_mean IS NOT NULL or WHERE ROW_NUMBER() > N."
+      },
+      {
+        "scenario": "STDDEV = 0 in rolling window",
+        "what_happens": "Rolling z-score is NULL — no variability in baseline.",
+        "handling": "Use COALESCE(rolling_std, 1) to avoid division by zero, or filter groups with zero std dev."
+      },
+      {
+        "scenario": "Duplicate timestamps",
+        "what_happens": "Rolling z-score may use incorrect order if timestamps are not unique.",
+        "handling": "Add tiebreaker: ORDER BY order_date, order_id to ensure deterministic order."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for sort, O(n) for rolling stats. Dominated by sort cost.",
+      "when_slow": "Large datasets (>10M rows) or high-partition counts with complex ORDER BY.",
+      "optimization_hint": "Pre-filter to relevant date range before rolling z-score. Materialize daily aggregates in a CTE. For rolling windows, consider incremental updates."
+    }
+  },
+  {
+    "id": "stat_iqr_outlier",
+    "title": "IQR-Based Outlier Detection",
+    "intent_tags": [
+      "IQR",
+      "interquartile range",
+      "outlier",
+      "anomaly",
+      "robust outlier",
+      "Q1",
+      "Q3",
+      "1.5*IQR",
+      "Tukey",
+      "non-parametric",
+      "median absolute deviation",
+      "robust"
+    ],
+    "sql_features": [
+      "percentile_cont",
+      "stddev",
+      "nullif",
+      "cte"
+    ],
+    "difficulty": "intermediate",
+    "pattern_type": "statistical",
+    "when_to_use": [
+      "user wants robust outlier detection that isn’t skewed by extreme values (e.g., revenue with occasional $1M orders)",
+      "user’s question includes 'IQR outlier', 'Tukey method', 'robust anomaly'",
+      "data is skewed or has heavy tails — z-score is too sensitive",
+      "building dashboards with stable outlier thresholds"
+    ],
+    "when_not_to_use": [
+      "data is approximately normal — z-score is more interpretable and efficient",
+      "user wants parametric thresholds (e.g., 95% confidence) — IQR is non-parametric",
+      "data has no meaningful quartiles (e.g., binary outcomes)"
+    ],
+    "related_patterns": [
+      "stat_zscore_outlier",
+      "stat_rolling_zscore",
+      "stat_percentile_distribution",
+      "stat_moving_average",
+      "seg_dynamic_threshold"
+    ],
+    "concept_explanation": {
+      "what_it_does": "IQR = Q3 - Q1. Outliers are defined as values < Q1 - 1.5*IQR or > Q3 + 1.5*IQR. This is Tukey’s method — robust because IQR is based on medians, not means, and is insensitive to extreme values.",
+      "mental_model": "Imagine a box plot: the box spans Q1 to Q3 (middle 50% of data). Whiskers extend to Q1-1.5×IQR and Q3+1.5×IQR. Points outside are outliers.",
+      "key_behavior": "IQR-based outliers are robust to extreme values — a single $1M order won’t inflate Q3 as much as it would inflate the mean in z-score."
+    },
+    "template": {
+      "minimal": "-- IQR outlier detection\nWITH stats AS (\n  SELECT\n    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) AS q1,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS q3\n  FROM orders\n),\noutliers AS (\n  SELECT\n    o.*,\n    s.q1,\n    s.q3,\n    s.q3 - s.q1 AS iqr,\n    CASE\n      WHEN o.revenue < s.q1 - 1.5 * (s.q3 - s.q1) THEN 'low_outlier'\n      WHEN o.revenue > s.q3 + 1.5 * (s.q3 - s.q1) THEN 'high_outlier'\n      ELSE 'normal'\n    END AS status\n  FROM orders o, stats s\n)\nSELECT * FROM outliers WHERE status != 'normal'",
+      "realistic": "-- IQR outlier detection per region, with robust thresholds\n-- Grain: one row per order with IQR-based status\nWITH order_metrics AS (\n  SELECT\n    c.region,\n    o.order_id,\n    oi.quantity * oi.unit_price AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n),\nregion_stats AS (\n  SELECT\n    region,\n    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) AS q1,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS q3\n  FROM order_metrics\n  GROUP BY region\n),\nwith_iqr AS (\n  SELECT\n    om.region,\n    om.order_id,\n    om.revenue,\n    rs.q1,\n    rs.q3,\n    rs.q3 - rs.q1 AS iqr\n  FROM order_metrics om\n  JOIN region_stats rs ON om.region = rs.region\n)\nSELECT\n  region,\n  order_id,\n  revenue,\n  ROUND(q1, 2) AS q1,\n  ROUND(q3, 2) AS q3,\n  ROUND(iqr, 2) AS iqr,\n  CASE\n    WHEN revenue < q1 - 1.5 * iqr THEN 'low_outlier'\n    WHEN revenue > q3 + 1.5 * iqr THEN 'high_outlier'\n    ELSE 'normal'\n  END AS status\nFROM with_iqr\nORDER BY CASE WHEN status = 'normal' THEN 1 ELSE 0 END, revenue DESC\nLIMIT 100",
+      "composable": "-- IQR outlier detection, then compare to z-score thresholds for combined flagging\n-- Composes: stat_iqr_outlier + stat_zscore_outlier\nWITH order_metrics AS (\n  SELECT\n    c.region,\n    o.order_id,\n    oi.quantity * oi.unit_price AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n),\nregion_stats AS (\n  SELECT\n    region,\n    AVG(revenue) AS avg_rev,\n    STDDEV(revenue) AS std_rev,\n    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) AS q1,\n    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS q3\n  FROM order_metrics\n  GROUP BY region\n),\nwith_both AS (\n  SELECT\n    om.region,\n    om.order_id,\n    om.revenue,\n    (om.revenue - rs.avg_rev) / NULLIF(rs.std_rev, 0) AS z_score,\n    rs.q1,\n    rs.q3,\n    rs.q3 - rs.q1 AS iqr\n  FROM order_metrics om\n  JOIN region_stats rs ON om.region = rs.region\n)\nSELECT\n  region,\n  order_id,\n  revenue,\n  ROUND(z_score, 2) AS z_score,\n  CASE\n    WHEN revenue < q1 - 1.5 * iqr THEN 'IQR_outlier'\n    WHEN revenue > q3 + 1.5 * iqr THEN 'IQR_outlier'\n    ELSE 'IQR_normal'\n  END AS iqr_status,\n  CASE\n    WHEN ABS(z_score) > 3 THEN 'z_outlier'\n    ELSE 'z_normal'\n  END AS z_status\nFROM with_both\nWHERE revenue < q1 - 1.5 * iqr OR revenue > q3 + 1.5 * iqr OR ABS(z_score) > 3"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using IQR without verifying non-parametric assumptions",
+        "what_goes_wrong": "IQR assumes the data has a meaningful median and quartiles. For binary data (0/1) or highly bimodal distributions, Q1/Q3 may not reflect the true 'center'.",
+        "symptom": "Outlier thresholds don’t match business logic — e.g., IQR flags 0 as an outlier when 0 is normal.",
+        "bad_sql": "SELECT * FROM orders WHERE revenue < PERCENTILE_CONT(0.25) - 1.5 * IQR",
+        "good_sql": "SELECT DISTINCT revenue FROM orders ORDER BY revenue",
+        "detection_sql": "SELECT MIN(revenue), MAX(revenue), COUNT(DISTINCT revenue) FROM orders",
+        "handling_sql": "For binary/bimodal data, use IQR only if median makes sense. Otherwise, use domain-specific thresholds."
+      },
+      {
+        "mistake": "Using IQR on grouped data without group-specific thresholds",
+        "what_goes_wrong": "Global IQR mixes multiple groups. If one group has high revenue, its Q3 inflates the global threshold — outliers in low-revenue groups are missed.",
+        "symptom": "Low-revenue orders are not flagged as outliers — global IQR is too wide.",
+        "bad_sql": "SELECT * FROM orders WHERE revenue > PERCENTILE_CONT(0.75) + 1.5 * IQR",
+        "good_sql": "SELECT * FROM orders o\nWHERE revenue > (\n  SELECT PERCENTILE_CONT(0.75) + 1.5 * (PERCENTILE_CONT(0.75) - PERCENTILE_CONT(0.25))\n  FROM orders WHERE customer_id = o.customer_id\n)",
+        "detection_sql": "SELECT region, COUNT(*) FROM orders GROUP BY region HAVING COUNT(*) > 1000",
+        "handling_sql": "Precompute per-group stats in a CTE."
+      },
+      {
+        "mistake": "Using IQR thresholds without checking for zero IQR",
+        "what_goes_wrong": "If all values in a group are identical (e.g., all orders = $10), IQR = 0, and threshold becomes Q1 - 0 = Q1 — no outliers are possible, even if data should vary.",
+        "symptom": "No outliers flagged — IQR = 0, thresholds collapse to Q1.",
+        "bad_sql": "SELECT * FROM orders WHERE revenue > q3 + 1.5 * iqr AND iqr > 0",
+        "good_sql": "SELECT * FROM orders WHERE revenue > q3 + 1.5 * NULLIF(iqr, 0) OR iqr = 0 AND revenue != q1",
+        "detection_sql": "SELECT region, q1, q3, q3 - q1 AS iqr FROM (\n  SELECT region, PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) AS q1, PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) AS q3\n  FROM orders\n  GROUP BY region\n) t\nWHERE iqr = 0",
+        "handling_sql": "Use NULLIF(iqr, 0) and add fallback: CASE WHEN iqr = 0 THEN ABS(revenue - q1) > threshold ELSE revenue outside [q1-1.5*iqr, q3+1.5*iqr] END."
+      },
+      {
+        "mistake": "Confusing IQR with standard deviation outlier thresholds",
+        "what_goes_wrong": "IQR uses 1.5×IQR for outliers, while z-score uses 3σ. For normal data, 1.5×IQR ≈ 2.7σ — slightly more sensitive than z-score’s 3σ. Users may misinterpret IQR thresholds.",
+        "symptom": "More outliers flagged with IQR than z-score — not an error, but unexpected.",
+        "bad_sql": "SELECT * FROM orders WHERE revenue > q3 + 3 * iqr",
+        "good_sql": "SELECT * FROM orders WHERE revenue > q3 + 1.5 * iqr",
+        "detection_sql": "SELECT q1, q3, q3 - q1 AS iqr, COUNT(*) FROM (\n  SELECT revenue,\n         PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue) OVER () AS q1,\n         PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue) OVER () AS q3\n  FROM orders\n) WHERE revenue > q3 + 1.5 * iqr",
+        "handling_sql": "For normal data, z-score thresholds (3σ) are tighter. For skewed data, IQR is more robust. Choose based on distribution, not habit."
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "IQR availability per dialect",
+        "duckdb_behavior": "DuckDB supports PERCENTILE_CONT for Q1/Q3. IQR = Q3 - Q1.",
+        "postgres_behavior": "Postgres supports PERCENTILE_CONT. IQR is easy to compute.",
+        "bigquery_behavior": "BigQuery supports PERCENTILE_CONT — same as DuckDB/Postgres.",
+        "safe_alternative": "IQR is portable — use PERCENTILE_CONT(0.25) and PERCENTILE_CONT(0.75) to compute Q1/Q3. No dialect-specific issues."
+      },
+      {
+        "construct": "NULL handling in IQR",
+        "duckdb_behavior": "PERCENTILE_CONT ignores NULLs — same as other aggregates.",
+        "postgres_behavior": "Same — NULLs excluded.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "No change needed — PERCENTILE_CONT handles NULLs consistently. But verify with COUNT(*) vs COUNT(column) to detect NULLs."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants *robust* outlier detection for skewed or outlier-heavy data",
+        "user’s question includes 'IQR', 'Tukey', 'robust anomaly'",
+        "data has heavy tails or extreme values that distort z-score",
+        "non-parametric thresholds are preferred (no distribution assumptions)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "data is approximately normal and z-score is interpretable",
+          "use_instead": "stat_zscore_outlier",
+          "why": "Z-scores are more interpretable (standard deviations from mean)"
+        },
+        {
+          "condition": "user needs *parametric* thresholds (e.g., 95% confidence)",
+          "use_instead": "stat_zscore_outlier",
+          "why": "Z-scores align with normal distribution confidence intervals"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "IQR",
+        "Tukey",
+        "robust",
+        "interquartile",
+        "non-parametric",
+        "median-based"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "All values are identical",
+        "what_happens": "IQR = 0, Q1 = Q3 = median — no outliers possible.",
+        "handling": "Add fallback: flag values ≠ median as outliers, or use coefficient of variation (CV = 0 means no variability)."
+      },
+      {
+        "scenario": "Small sample size (n < 4)",
+        "what_happens": "Q1/Q3 may be unstable — quartiles require at least 4 points for meaningful separation.",
+        "handling": "Add minimum sample size check: HAVING COUNT(*) >= 4."
+      },
+      {
+        "scenario": "Tied values at Q1/Q3",
+        "what_happens": "IQR is correct, but outlier thresholds may exclude values that are actually normal.",
+        "handling": "No issue — IQR handles ties correctly. Verify with visual inspection if needed."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n log n) for percentile computation, O(n) for outlier classification. Dominated by sort cost.",
+      "when_slow": "Large datasets (>10M rows) or high-partition counts.",
+      "optimization_hint": "Pre-filter to relevant rows before computing percentiles. Materialize group stats in a CTE if reused. For rolling IQR, use windowed PERCENTILE_CONT."
+    }
+  }
+]

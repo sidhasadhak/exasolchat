@@ -1,0 +1,662 @@
+[
+  {
+    "id": "cte_multi_stage_pipeline",
+    "title": "Multi-Stage CTE Pipeline",
+    "intent_tags": [
+      "CTE pipeline", "staged CTEs", "clean code CTEs", "modular CTEs",
+      "step-by-step CTE", "base filter enrich", "ETL with CTEs",
+      "CTE architecture", "query structure", "readable subqueries"
+    ],
+    "sql_features": ["cte", "recursive_cte", "join", "filter_clause"],
+    "difficulty": "intermediate",
+    "pattern_type": "architectural",
+    "when_to_use": [
+      "user wants to break a complex query into readable, testable steps",
+      "user’s question includes 'how do I structure CTEs?', 'modular SQL'",
+      "building reusable components (e.g., base data, filtered set, enriched metrics)",
+      "debugging multi-step analytics — each CTE can be isolated and validated"
+    ],
+    "when_not_to_use": [
+      "user needs *single-pass* performance optimization (CTEs may be materialized twice in some engines)",
+      "user’s query is simple (2-3 lines) — CTEs add unnecessary nesting",
+      "the pipeline has *no state dependencies* — a single query is clearer"
+    ],
+    "related_patterns": [
+      "cte_preagg_before_join", "cte_vs_subquery", "cte_reuse",
+      "cte_recursive", "agg_preagg_before_join"
+    ],
+    "concept_explanation": {
+      "what_it_does": "A multi-stage CTE pipeline chains CTEs where each processes the previous stage: base → filter → enrich → aggregate → format. Each CTE does one thing well, improving readability, debuggability, and reuse.",
+      "mental_model": "Imagine an assembly line: raw parts arrive (base), inspected (filter), painted (enrich), packaged (aggregate), labeled (format). Each station does one job — easy to fix if something breaks."
+    },
+    "template": {
+      "minimal": "-- Base → Filter → Enrich pipeline\nWITH\n  base AS (SELECT * FROM orders WHERE order_date >= CURRENT_DATE - INTERVAL '30 days'),\n  filtered AS (SELECT * FROM base WHERE status = 'shipped'),\n  enriched AS (SELECT *, quantity * unit_price AS revenue FROM filtered)\nSELECT * FROM enriched",
+      "realistic": "-- Multi-stage pipeline: base → filter → enrich → aggregate → format\n-- Grain: one row per order with calculated metrics\nWITH\n  -- Base: raw, filtered orders\n  base_orders AS (\n    SELECT o.*, c.region, c.signup_date\n    FROM orders o\n    JOIN customers c ON o.customer_id = c.customer_id\n    WHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days'\n  ),\n  -- Filter: valid orders only (exclude cancelled, test)\n  filtered_orders AS (\n    SELECT * FROM base_orders WHERE status NOT IN ('cancelled', 'test')\n  ),\n  -- Enrich: add item-level calculations\n  enriched_orders AS (\n    SELECT\n      fo.*,\n      (SELECT SUM(oi.quantity * oi.unit_price) FROM order_items oi WHERE oi.order_id = fo.order_id) AS order_revenue,\n      (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = fo.order_id) AS item_count\n    FROM filtered_orders fo\n  ),\n  -- Aggregate: sum per region\n  region_metrics AS (\n    SELECT\n      region,\n      COUNT(*) AS order_count,\n      SUM(order_revenue) AS total_revenue,\n      AVG(item_count) AS avg_items_per_order\n    FROM enriched_orders\n    GROUP BY region\n  )\nSELECT\n  region,\n  order_count,\n  ROUND(total_revenue, 2) AS total_revenue,\n  ROUND(avg_items_per_order, 2) AS avg_items_per_order\nFROM region_metrics\nORDER BY total_revenue DESC",
+      "composable": "-- Pipeline: base → filter → enrich → aggregate → format + anomaly detection\n-- Composes: cte_multi_stage_pipeline + stat_rolling_zscore\nWITH\n  base_orders AS (\n    SELECT o.*, c.region, DATE_TRUNC('month', o.order_date) AS order_month\n    FROM orders o\n    JOIN customers c ON o.customer_id = c.customer_id\n    WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  ),\n  enriched AS (\n    SELECT\n      bo.*,\n      (SELECT SUM(oi.quantity * oi.unit_price) FROM order_items oi WHERE oi.order_id = bo.order_id) AS order_revenue\n    FROM base_orders bo\n  ),\n  monthly_revenue AS (\n    SELECT region, order_month, SUM(order_revenue) AS revenue\n    FROM enriched\n    GROUP BY region, order_month\n  ),\n  with_rolling AS (\n    SELECT\n      region,\n      order_month,\n      revenue,\n      AVG(revenue) OVER (PARTITION BY region ORDER BY order_month ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS rolling_2m_avg,\n      STDDEV(revenue) OVER (PARTITION BY region ORDER BY order_month ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS rolling_2m_std\n    FROM monthly_revenue\n  )\nSELECT\n  region,\n  order_month,\n  revenue,\n  rolling_2m_avg,\n  rolling_2m_std,\n  CASE\n    WHEN rolling_2m_avg IS NOT NULL AND rolling_2m_std > 0\n      AND ABS(revenue - rolling_2m_avg) > 2 * rolling_2m_std\n    THEN 'anomaly'\n    ELSE 'normal'\n  END AS flag\nFROM with_rolling"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "CTE re-runs base logic in multiple downstream CTEs",
+        "what_goes_wrong": "Each CTE referencing the base will re-execute the base query — no materialization. This duplicates expensive work (e.g., large JOINs), causing O(n) slowdown.",
+        "symptom": "Query runs slower than expected — same filter applied 5 times instead of once.",
+        "bad_sql": "WITH\n  base AS (SELECT ... FROM orders o JOIN customers c ON ... WHERE ...),\n  stage1 AS (SELECT * FROM base WHERE ...),\n  stage2 AS (SELECT * FROM base WHERE ...)  -- ❌ base re-run\nSELECT * FROM stage1\nUNION ALL\nSELECT * FROM stage2",
+        "good_sql": "WITH\n  base AS (SELECT ... FROM orders o JOIN customers c ON ... WHERE ...),\n  stage1 AS (SELECT * FROM base WHERE ...),\n  stage2 AS (SELECT * FROM stage1 WHERE ...)  -- ✅ reuse stage1\nSELECT * FROM stage1\nUNION ALL\nSELECT * FROM stage2",
+        "detection_sql": "EXPLAIN SELECT ... -- check if base CTE is scanned multiple times"
+      },
+      {
+        "mistake": "CTEs referenced out of order (forward reference)",
+        "what_goes_wrong": "In most SQL engines, CTEs must be referenced *after* they’re defined. A CTE referencing a later CTE causes a syntax error or undefined behavior.",
+        "symptom": "Query fails with 'unknown CTE' or 'invalid column reference'.",
+        "bad_sql": "WITH\n  stage2 AS (SELECT * FROM stage1),  -- ❌ stage1 not yet defined\n  stage1 AS (SELECT * FROM orders)\nSELECT * FROM stage2",
+        "good_sql": "WITH\n  stage1 AS (SELECT * FROM orders),\n  stage2 AS (SELECT * FROM stage1)  -- ✅ reference after definition\nSELECT * FROM stage2",
+        "detection_sql": "SELECT * FROM (\n  WITH stage2 AS (SELECT * FROM stage1), stage1 AS (SELECT * FROM orders)\n  SELECT * FROM stage2\n) LIMIT 1"
+      },
+      {
+        "mistake": "Over-nesting with too many CTEs (>10)",
+        "what_goes_wrong": "Excessive CTE nesting makes queries unmaintainable. Each CTE adds complexity; more than 10-15 CTEs often indicate the logic should be moved to code or views.",
+        "symptom": "Query is hundreds of lines, hard to debug, and team avoids modifying it.",
+        "bad_sql": "WITH base AS (...), filter1 AS (...), filter2 AS (...), enrich1 AS (...), enrich2 AS (...), ...  -- 15+ CTEs",
+        "good_sql": "-- Consolidate related logic:\nWITH\n  base_enriched AS (SELECT ..., SUM(...) AS metric FROM base WHERE ...),\n  final_metrics AS (SELECT ..., AVG(metric) OVER (...) FROM base_enriched)\nSELECT * FROM final_metrics",
+        "detection_sql": "SELECT COUNT(*) AS cte_count FROM (\n  SELECT * FROM information_schema.tables WHERE table_schema = 'pg_temp' -- DuckDB-specific\n)"
+      },
+      {
+        "mistake": "CTE redefinition with same name",
+        "what_goes_wrong": "Some engines allow redefining a CTE in the same query (DuckDB does), but it’s confusing and may override earlier logic. It hides bugs.",
+        "symptom": "CTE A is defined twice — one definition shadows the other, causing unexpected results.",
+        "bad_sql": "WITH a AS (SELECT 1), b AS (SELECT * FROM a), a AS (SELECT 2) SELECT * FROM b",
+        "good_sql": "WITH a1 AS (SELECT 1), b AS (SELECT * FROM a1), a2 AS (SELECT 2) SELECT * FROM a2",
+        "detection_sql": "SELECT * FROM (\n  WITH a AS (SELECT 1), a AS (SELECT 2) SELECT * FROM a\n) LIMIT 1"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "DuckDB CTE materialization",
+        "duckdb_behavior": "DuckDB may materialize CTEs if referenced multiple times, but it’s not guaranteed. Performance depends on optimizer heuristics.",
+        "postgres_behavior": "Postgres does *not* materialize CTEs by default — each reference re-runs the CTE. This causes O(n) overhead for repeated use.",
+        "bigquery_behavior": "BigQuery may materialize CTEs — performance is often better than Postgres.",
+        "safe_alternative": "For Postgres or repeated references, use TEMP TABLEs or materialized views. For portability, avoid CTE reuse in performance-critical queries."
+      },
+      {
+        "construct": "CTE ordering in DuckDB vs others",
+        "duckdb_behavior": "DuckDB allows CTEs to reference *later* CTEs in some cases — but this is non-standard and risky.",
+        "postgres_behavior": "Strict order: CTEs must be referenced after definition. Forward references fail.",
+        "bigquery_behavior": "Same as Postgres — CTEs must be ordered definitionally.",
+        "safe_alternative": "Always define CTEs in dependency order: base → filter → enrich → aggregate. Never assume forward references work."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user’s query has *multiple distinct steps* (filter, enrich, aggregate)",
+        "user wants to *debug* intermediate results (e.g., isolate a filter)",
+        "user needs *readability* and *team collaboration*",
+        "the pipeline has *state dependencies* (stage N needs stage N-1)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user needs *single-pass* performance (no reuse)",
+          "use_instead": "subquery",
+          "why": "Subqueries inline and avoid CTE overhead"
+        },
+        {
+          "condition": "user’s query is *simple* (<5 steps)",
+          "use_instead": "single_query",
+          "why": "No nesting needed — keep it flat"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "CTE pipeline", "modular SQL", "step-by-step",
+        "base filter enrich", "CTE architecture"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "CTE has zero rows",
+        "what_happens": "Downstream CTEs inherit zero rows — query returns empty results. This is correct if the filter is intended.",
+        "handling": "No issue — zero rows propagate. Use LEFT JOIN if you want to preserve parent rows with NULLs."
+      },
+      {
+        "scenario": "CTE references itself recursively",
+        "what_happens": "Non-recursive CTEs can’t reference themselves — error. Recursive CTEs require a different syntax (anchor + recursive member).",
+        "handling": "Use recursive CTEs for hierarchical data, not for self-reference in non-hierarchical cases."
+      },
+      {
+        "scenario": "CTE uses non-deterministic functions (e.g., RANDOM())",
+        "what_happens": "Each CTE reference may evaluate the function anew — inconsistent results if the CTE is reused.",
+        "handling": "Materialize non-deterministic CTEs in a TEMP TABLE or use a subquery to fix the random values."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) per CTE if not materialized, or O(n) total if materialized once. Repeated CTE references can cause O(n × k) where k = reuse count.",
+      "when_slow": "CTEs referenced multiple times without materialization (e.g., Postgres with large base CTEs reused in 5+ stages).",
+      "optimization hint": "Pre-filter early in the pipeline to reduce data volume. For Postgres, materialize expensive CTEs in TEMP TABLEs. Use EXPLAIN to verify plan."
+    }
+  },
+  {
+    "id": "cte_recursive",
+    "title": "Recursive CTE for Hierarchical Data",
+    "intent_tags": [
+      "recursive CTE", "hierarchical data", "org chart", "category tree",
+      "bill of materials", "parent-child", "tree traversal",
+      "self-referencing", "BOM", "category hierarchy"
+    ],
+    "sql_features": ["recursive_cte", "cte", "join", "union_all"],
+    "difficulty": "advanced",
+    "pattern_type": "architectural",
+    "when_to_use": [
+      "user wants to traverse *hierarchical* or *tree-structured* data (e.g., employees reporting to managers, categories in a taxonomy)",
+      "user’s question includes 'find all subcategories', 'org chart', 'bill of materials'",
+      "generating paths in trees (e.g., 'Sales > Electronics > Phones' for each product)",
+      "calculating depths (e.g., 'how many levels from root to leaf')"
+    ],
+    "when_not_to_use": [
+      "user’s data isn’t hierarchical — use simpler joins or arrays instead",
+      "performance is critical and tree is very large (recursion can be slow)",
+      "the hierarchy has cycles (loops) — recursive CTEs may loop forever without cycle detection"
+    ],
+    "related_patterns": [
+      "cte_multi_stage_pipeline", "cte_vs_subquery", "agg_preagg_before_join",
+      "join_self", "seg_case_when"
+    ],
+    "concept_explanation": {
+      "what_it_does": "A recursive CTE has two parts: an anchor member (initial rows, e.g., root nodes) and a recursive member (joins to the CTE itself to find children). It iteratively builds the tree level by level until no more rows are found.",
+      "mental_model": "Imagine a ladder: step 1 is the root (anchor), step 2 finds children of step 1, step 3 finds children of step 2, etc. The ladder grows until no new rungs exist."
+    },
+    "template": {
+      "minimal": "-- Categories and their full path\nWITH RECURSIVE cat_tree AS (\n  -- Anchor: root categories (no parent)\n  SELECT category_id, category_name, parent_id, category_name AS path, 1 AS depth\n  FROM categories\n  WHERE parent_id IS NULL\n  UNION ALL\n  -- Recursive: children of previous level\n  SELECT c.category_id, c.category_name, c.parent_id,\n         ct.path || ' > ' || c.category_name AS path,\n         ct.depth + 1 AS depth\n  FROM categories c\n  JOIN cat_tree ct ON c.parent_id = ct.category_id\n)\nSELECT * FROM cat_tree WHERE depth <= 3",
+      "realistic": "-- Find all subcategories of 'Electronics' with depth and path\n-- Grain: one row per category in the Electronics subtree\nWITH RECURSIVE cat_tree AS (\n  -- Anchor: start from 'Electronics'\n  SELECT category_id, category_name, parent_id, category_name AS path, 1 AS depth\n  FROM categories\n  WHERE category_name = 'Electronics'\n  UNION ALL\n  -- Recursive: add children of each level\n  SELECT c.category_id, c.category_name, c.parent_id,\n         ct.path || ' > ' || c.category_name AS path,\n         ct.depth + 1 AS depth\n  FROM categories c\n  JOIN cat_tree ct ON c.parent_id = ct.category_id\n),\n-- Limit depth to avoid runaway recursion\nmax_depth AS (\n  SELECT MAX(depth) AS max_depth FROM cat_tree\n)\nSELECT\n  ct.category_id,\n  ct.category_name,\n  ct.path,\n  ct.depth,\n  (SELECT COUNT(*) FROM products p WHERE p.category_id = ct.category_id) AS product_count\nFROM cat_tree ct\nCROSS JOIN max_depth md\nWHERE ct.depth <= md.max_depth\nORDER BY ct.depth, ct.category_name",
+      "composable": "-- Recursively build org chart paths, then filter managers with >5 direct reports\n-- Composes: cte_recursive + agg_conditional\nWITH RECURSIVE org_path AS (\n  -- Anchor: root employees (no manager)\n  SELECT employee_id, employee_name, manager_id, employee_name AS path, 1 AS level\n  FROM employees\n  WHERE manager_id IS NULL\n  UNION ALL\n  -- Recursive: add direct reports\n  SELECT e.employee_id, e.employee_name, e.manager_id,\n         op.path || ' / ' || e.employee_name AS path,\n         op.level + 1 AS level\n  FROM employees e\n  JOIN org_path op ON e.manager_id = op.employee_id\n),\ndirect_reports AS (\n  SELECT manager_id, COUNT(*) AS direct_reports\n  FROM employees\n  WHERE manager_id IS NOT NULL\n  GROUP BY manager_id\n)\nSELECT\n  op.employee_id,\n  op.employee_name,\n  op.path,\n  op.level,\n  dr.direct_reports\nFROM org_path op\nJOIN direct_reports dr ON op.employee_id = dr.manager_id\nWHERE dr.direct_reports > 5\nORDER BY op.level"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Missing UNION ALL (using UNION instead)",
+        "what_goes_wrong": "UNION removes duplicates — if an employee appears at multiple levels (impossible in tree but possible in graph), rows vanish. Also, UNION is slower (needs dedup).",
+        "symptom": "Some recursive rows are missing — e.g., only 90% of org chart shows up.",
+        "bad_sql": "WITH RECURSIVE org_path AS (\n  SELECT ... -- anchor\n  UNION\n  SELECT ... -- recursive\n)\nSELECT * FROM org_path",
+        "good_sql": "WITH RECURSIVE org_path AS (\n  SELECT ... -- anchor\n  UNION ALL\n  SELECT ... -- recursive\n)\nSELECT * FROM org_path",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT employee_id FROM employees WHERE manager_id IS NULL  -- root count\n  UNION\n  SELECT employee_id FROM employees WHERE manager_id IS NOT NULL  -- all others\n) t"
+      },
+      {
+        "mistake": "No depth limit — infinite recursion",
+        "what_goes_wrong": "If the hierarchy has cycles (e.g., A reports to B, B reports to A) or poor join logic, recursion never stops — query runs forever or hits recursion limit.",
+        "symptom": "Query hangs, timeouts, or fails with 'recursion limit exceeded'.",
+        "bad_sql": "WITH RECURSIVE cat_tree AS (\n  SELECT category_id, parent_id FROM categories WHERE category_id = 1\n  UNION ALL\n  SELECT c.category_id, c.parent_id\n  FROM categories c\n  JOIN cat_tree ct ON c.parent_id = ct.category_id  -- ❌ no depth limit\n)\nSELECT * FROM cat_tree",
+        "good_sql": "WITH RECURSIVE cat_tree AS (\n  SELECT category_id, parent_id, 1 AS depth FROM categories WHERE category_id = 1\n  UNION ALL\n  SELECT c.category_id, c.parent_id, ct.depth + 1\n  FROM categories c\n  JOIN cat_tree ct ON c.parent_id = ct.category_id\n  WHERE ct.depth < 10  -- ✅ limit depth\n)\nSELECT * FROM cat_tree",
+        "detection_sql": "SELECT * FROM information_schema.tables WHERE table_name LIKE '%cat_tree%' -- check if recursion limit was hit"
+      },
+      {
+        "mistake": "Accidental CROSS JOIN instead of JOIN on hierarchy key",
+        "what_goes_wrong": "Without a JOIN condition (e.g., ON c.parent_id = ct.category_id), the recursive member creates a Cartesian product — every row joins to every row, exploding row counts.",
+        "symptom": "Query returns millions of rows for a 100-row tree — performance grinds to halt.",
+        "bad_sql": "WITH RECURSIVE org_path AS (\n  SELECT employee_id FROM employees WHERE manager_id IS NULL\n  UNION ALL\n  SELECT e.employee_id\n  FROM employees e\n  JOIN org_path op ON true  -- ❌ CROSS JOIN\n)\nSELECT * FROM org_path",
+        "good_sql": "WITH RECURSIVE org_path AS (\n  SELECT employee_id FROM employees WHERE manager_id IS NULL\n  UNION ALL\n  SELECT e.employee_id\n  FROM employees e\n  JOIN org_path op ON e.manager_id = op.employee_id  -- ✅ hierarchical join\n)\nSELECT * FROM org_path",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT e.employee_id\n  FROM employees e\n  JOIN org_path op ON true\n) t"
+      },
+      {
+        "mistake": "Recursive CTE referenced outside the RECURSIVE keyword",
+        "what_goes_wrong": "The CTE name can’t be used outside the recursive block — it’s only valid *inside* the UNION ALL. Users may try to join it elsewhere.",
+        "symptom": "Query fails with 'recursive CTE must reference itself in the recursive member'.",
+        "bad_sql": "WITH RECURSIVE org_path AS (\n  SELECT * FROM employees WHERE manager_id IS NULL\n  UNION ALL\n  SELECT * FROM employees e JOIN org_path op ON e.manager_id = op.employee_id\n),\n-- ❌ Reference outside recursion\nmanager_count AS (SELECT COUNT(*) FROM org_path)  -- error\nSELECT * FROM manager_count",
+        "good_sql": "WITH RECURSIVE org_path AS (\n  SELECT * FROM employees WHERE manager_id IS NULL\n  UNION ALL\n  SELECT * FROM employees e JOIN org_path op ON e.manager_id = op.employee_id\n)\nSELECT COUNT(*) FROM org_path",  
+        "detection_sql": "EXPLAIN SELECT * FROM (\n  WITH RECURSIVE org_path AS (...), manager_count AS (SELECT COUNT(*) FROM org_path)\n  SELECT * FROM manager_count\n) LIMIT 1"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "RECURSIVE keyword requirements",
+        "duckdb_behavior": "DuckDB requires RECURSIVE keyword. Recursive CTEs are supported and optimized.",
+        "postgres_behavior": "Postgres requires RECURSIVE. It’s standard and well-optimized.",
+        "bigquery_behavior": "BigQuery supports RECURSIVE CTEs, but with a recursion depth limit (default 1000).",
+        "safe_alternative": "Always include RECURSIVE. For BigQuery, set OPTIONS (max_recursion_depth = 5000) if deeper trees are needed."
+      },
+      {
+        "construct": "Cycle detection in hierarchical data",
+        "duckdb_behavior": "DuckDB doesn’t detect cycles automatically — data with parent-child loops will recurse infinitely unless depth-limited.",
+        "postgres_behavior": "Same — cycles cause infinite recursion without manual checks.",
+        "bigquery_behavior": "Same — depth limits prevent infinite loops, but may truncate trees.",
+        "safe_alternative": "Always add depth limits (e.g., WHERE depth < 20). For data that might have cycles, add a path check: WHERE ',' || ct.path || ',' NOT LIKE '%,' || c.category_name || ',%'."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user’s data has a *hierarchy* or *tree structure* (e.g., org chart, categories)",
+        "user wants *all descendants* or *all ancestors* in a hierarchy",
+        "user’s question includes 'find subcategories', 'tree traversal', 'bill of materials'",
+        "the hierarchy depth is unknown or variable"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user’s data is flat or has simple one-to-many relationships",
+          "use_instead": "join_self",
+          "why": "Simple joins are faster and clearer for flat data"
+        },
+        {
+          "condition": "performance is critical and tree is small (<100 rows)",
+          "use_instead": "application_logic",
+          "why": "Recursion in code (e.g., Python) may be faster for small trees"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "recursive", "hierarchy", "org chart", "category tree",
+        "parent-child", "bill of materials"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Cycle in hierarchy (A → B → A)",
+        "what_happens": "Without depth limit, recursion loops forever. With depth limit, tree is truncated at that depth.",
+        "handling": "Always add depth limits. For strict trees, validate data integrity first (no cycles in parent_id)."
+      },
+      {
+        "scenario": "Root nodes have NULL parent_id",
+        "what_happens": "Anchor member correctly starts with NULL parent_id rows.",
+        "handling": "No issue — NULL = root in hierarchical models."
+      },
+      {
+        "scenario": "Very deep hierarchy (>100 levels)",
+        "what_happens": "Default recursion limits may truncate results. Performance may degrade.",
+        "handling": "Increase depth limit or break into multiple queries. Consider materialized paths (e.g., 'Sales > Electronics') as a denormalized column."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n × d) — where n = nodes, d = average depth. Worst-case O(n²) for deep trees.",
+      "when_slow": "Large trees (>10k nodes) with high depth. Recursion involves repeated joins — can be slow on large data.",
+      "optimization hint": "Add early filters in the anchor (e.g., WHERE parent_id IS NULL) and recursive member. Pre-aggregate leaf nodes if only counts are needed. Use TEMP TABLEs for caching."
+    }
+  },
+  {
+    "id": "cte_vs_subquery",
+    "title": "CTE vs Subquery vs Temp Table Decision Guide",
+    "intent_tags": [
+      "CTE vs subquery", "when to use CTE", "temp table vs CTE",
+      "materialize CTE", "query architecture", "performance tradeoff",
+      "CTE reuse", "subquery vs CTE", "CTE performance"
+    ],
+    "sql_features": ["cte", "subquery", "temp_table", "join"],
+    "difficulty": "advanced",
+    "pattern_type": "architectural",
+    "when_to_use": [
+      "user debates between CTEs, subqueries, and temp tables — wants a decision framework",
+      "user’s question includes 'should I use CTE or subquery?', 'temp table or CTE?'",
+      "optimizing for readability vs performance in complex queries",
+      "deciding where to materialize intermediate results"
+    ],
+    "when_not_to_use": [
+      "user’s query is simple (one or two tables) — no decision needed",
+      "user wants to avoid all complexity — use plain queries",
+      "the optimization is premature — measure before optimizing"
+    ],
+    "related_patterns": [
+      "cte_multi_stage_pipeline", "cte_reuse", "cte_preagg_before_join",
+      "cte_recursive", "agg_preagg_before_join"
+    ],
+    "concept_explanation": {
+      "what_it_does": "CTEs are syntactic sugar (not materialized by default in Postgres) but improve readability. Subqueries inline logic but can be repeated. Temp tables materialize data explicitly, reusing it across queries. The choice balances readability, reuse, and performance.",
+      "mental_model": "Imagine building with Lego: CTEs are *instructions* (readable, but rebuilds each time), subqueries are *glued blocks* (single-use), temp tables are *stored bricks* (built once, reused)."
+    },
+    "template": {
+      "minimal": "-- CTE: readable, may recompute\nWITH base AS (SELECT ... FROM orders)\nSELECT * FROM base WHERE ...;\n\n-- Subquery: inline, no reuse\nSELECT * FROM (SELECT ... FROM orders) t WHERE ...;\n\n-- Temp table: materialized, reusable\nCREATE TEMP TABLE base AS SELECT ... FROM orders;\nSELECT * FROM base WHERE ...;\nDROP TABLE base;",
+      "realistic": "-- Decision guide: when to use each\n-- Scenario 1: Readable CTE pipeline (moderate size, one-off query)\nWITH base AS (SELECT o.*, c.region FROM orders o JOIN customers c ON o.customer_id = c.customer_id WHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days')\nSELECT region, COUNT(*) FROM base GROUP BY region;\n\n-- Scenario 2: Subquery for small, one-time filter\nSELECT * FROM orders WHERE order_id IN (SELECT order_id FROM order_items WHERE quantity > 10);\n\n-- Scenario 3: Temp table for reuse across multiple queries\nCREATE TEMP TABLE top_customers AS (\n  SELECT customer_id, SUM(oi.quantity * oi.unit_price) AS lifetime_revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  GROUP BY customer_id\n  HAVING SUM(oi.quantity * oi.unit_price) > 10000\n);\n\n-- Reuse top_customers in multiple downstream queries\nSELECT * FROM top_customers WHERE region = 'North';\nSELECT customer_id, COUNT(*) FROM top_customers JOIN orders USING (customer_id) GROUP BY 1;",
+      "composable": "-- CTE for readability + temp table for reuse in complex pipeline\n-- Composes: cte_vs_subquery + cte_multi_stage_pipeline\nWITH base_orders AS (\n  SELECT o.*, c.region\n  FROM orders o\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n),\n enriched AS (\n   SELECT bo.*, (SELECT SUM(oi.quantity * oi.unit_price) FROM order_items oi WHERE oi.order_id = bo.order_id) AS revenue\n   FROM base_orders bo\n )\nCREATE TEMP TABLE enriched_orders AS SELECT * FROM enriched;\n\n-- Now reuse in downstream queries\nSELECT region, SUM(revenue) FROM enriched_orders GROUP BY region;\nSELECT * FROM enriched_orders WHERE revenue > 1000 ORDER BY revenue DESC;"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Assuming CTEs are materialized (Postgres)",
+        "what_goes_wrong": "In Postgres, CTEs are *not* materialized — each reference re-runs the query. If a CTE is reused 10 times, it runs 10 times. Users expect 'materialized' reuse and get O(n) slowdown.",
+        "symptom": "CTE-heavy queries run slower than equivalent temp table queries — e.g., 30s vs 5s.",
+        "bad_sql": "-- Postgres: CTE re-runs each time\nWITH base AS (SELECT ... FROM orders JOIN customers ...)  -- expensive join\nSELECT * FROM base WHERE ...  -- re-run\nUNION ALL\nSELECT * FROM base WHERE ...; -- re-run again",
+        "good_sql": "-- Materialize once:\nCREATE TEMP TABLE base AS SELECT ... FROM orders JOIN customers ...;\nSELECT * FROM base WHERE ...;\nUNION ALL\nSELECT * FROM base WHERE ...;",
+        "detection_sql": "EXPLAIN WITH base AS (...) SELECT * FROM base WHERE ... UNION ALL SELECT * FROM base WHERE ..."
+      },
+      {
+        "mistake": "Using CTEs for complex joins without filtering first",
+        "what_goes_wrong": "CTEs in multi-join pipelines may cause large intermediate tables if filters come *after* joins. Subqueries allow earlier filters, reducing rows sooner.",
+        "symptom": "CTE pipeline processes 100M rows, then filters to 1M; subquery filters to 1M first, then joins.",
+        "bad_sql": "WITH base AS (SELECT * FROM orders o JOIN customers c ON ...),\nfiltered AS (SELECT * FROM base WHERE status = 'shipped')\nSELECT * FROM filtered",
+        "good_sql": "SELECT * FROM orders o\nJOIN customers c ON o.customer_id = c.customer_id\nWHERE o.status = 'shipped'",
+        "detection_sql": "EXPLAIN SELECT * FROM (\n  SELECT * FROM orders o JOIN customers c ON ...\n) t WHERE status = 'shipped'\nEXCEPT\nEXPLAIN WITH base AS (...) SELECT * FROM filtered"
+      },
+      {
+        "mistake": "Overusing CTEs for readability and losing performance",
+        "what_goes_wrong": "Users add CTEs for every step, creating 20+ CTEs. Each adds syntactic overhead and may recompute expensive CTEs.",
+        "symptom": "Query is 500 lines, hard to debug, and runs 2× slower than a simpler version.",
+        "bad_sql": "WITH base AS (...), filter1 AS (...), filter2 AS (...), enrich1 AS (...), enrich2 AS (...), ...  -- 20+ CTEs\nSELECT * FROM final",
+        "good_sql": "-- Consolidate: use 3-5 CTEs with clear responsibilities\nWITH base_enriched AS (...), final AS (...)\nSELECT * FROM final",
+        "detection_sql": "SELECT COUNT(*) AS cte_count FROM (\n  SELECT * FROM information_schema.tables WHERE table_name LIKE 'cte_%'\n) -- DuckDB-specific check"
+      },
+      {
+        "mistake": "Using CTE when temp table is better for reuse",
+        "what_goes_wrong": "CTEs can’t be reused across queries — they’re in-memory and disappear after one query. Temp tables persist for the session, enabling reuse.",
+        "symptom": "User rewrites the same CTE 5 times in 5 queries, instead of creating a temp table once.",
+        "bad_sql": "CREATE OR REPLACE VIEW v_orders AS SELECT * FROM orders;\nSELECT * FROM v_orders WHERE ...; -- view is static, can’t be filtered early",
+        "good_sql": "CREATE TEMP TABLE orders_filtered AS SELECT * FROM orders WHERE ...;\nSELECT * FROM orders_filtered WHERE ...;\nSELECT * FROM orders_filtered WHERE ...;",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT * FROM v_orders WHERE ...\n) t\nEXCEPT\nSELECT COUNT(*) FROM (\n  SELECT * FROM orders_filtered WHERE ...\n) t"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "DuckDB CTE materialization",
+        "duckdb_behavior": "DuckDB may materialize CTEs if referenced multiple times — but this isn’t guaranteed. Use TEMP TABLE for certainty.",
+        "postgres_behavior": "CTEs are *never* materialized by default. Each reference re-runs the query.",
+        "bigquery_behavior": "BigQuery may materialize CTEs automatically — performance is often better than Postgres.",
+        "safe_alternative": "For Postgres or when reuse is critical, use TEMP TABLE. For DuckDB/BigQuery, CTEs are often sufficient unless reused heavily."
+      },
+      {
+        "construct": "CTE order dependency",
+        "duckdb_behavior": "DuckDB allows CTEs to reference *later* CTEs in some cases — but it’s non-standard and risky.",
+        "postgres_behavior": "CTEs must be referenced after definition. Forward references fail.",
+        "bigquery_behavior": "Same as Postgres.",
+        "safe_alternative": "Define CTEs in dependency order: base → filter → enrich → aggregate. Never assume forward references work."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user needs *readability* and *one-off* processing (CTEs)",
+        "user needs *reuse across queries* or *large intermediate data* (TEMP TABLE)",
+        "user’s question includes 'CTE or subquery?', 'temp table or CTE?'",
+        "performance testing shows subqueries or CTEs are too slow"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user needs *small, one-time filter*",
+          "use_instead": "subquery",
+          "why": "Inline subqueries avoid CTE overhead for simple cases"
+        },
+        {
+          "condition": "CTEs are reused >3 times in the same query",
+          "use_instead": "temp_table",
+          "why": "TEMP TABLE materializes once, avoiding O(n) CTE re-runs"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "CTE or subquery", "temp table or CTE", "materialize",
+        "performance tradeoff", "query architecture"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "CTE referenced in subquery",
+        "what_happens": "DuckDB allows it; Postgres does not — CTEs are in-scope only for the main query.",
+        "handling": "Move subquery logic into a CTE to avoid scope issues."
+      },
+      {
+        "scenario": "Temp table name conflict",
+        "what_happens": "DuckDB reuses temp table names; Postgres requires DROP before CREATE.",
+        "handling": "Use unique names (e.g., base_orders_20240101) or DROP TABLE IF EXISTS first."
+      },
+      {
+        "scenario": "CTE with non-deterministic functions",
+        "what_happens": "In DuckDB, CTEs may re-evaluate RANDOM() for each reference — inconsistent results.",
+        "handling": "Materialize non-deterministic CTEs in TEMP TABLEs to fix values."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "CTEs: O(n × k) where k = reuse count (Postgres). Temp tables: O(n) + O(m) where m = reuse count. Subqueries: O(n) per inline usage.",
+      "when_slow": "Postgres with reused CTEs, or DuckDB/BigQuery with very large intermediate tables.",
+      "optimization hint": "For Postgres or reused data, use TEMP TABLE. For DuckDB/BigQuery, CTEs are fine unless reused heavily. Profile with EXPLAIN to compare plans."
+    }
+  },
+  {
+    "id": "cte_preagg_before_join",
+    "title": "CTE for Pre-Aggregation Before Join",
+    "intent_tags": [
+      "pre-aggregate", "agg before join", "pre-sum", "pre-count",
+      "fan-out prevention", "CTE pre-join", "join optimization",
+      "one-to-one join", "pre-aggregate to key"
+    ],
+    "sql_features": ["cte", "join", "aggregation", "group_by"],
+    "difficulty": "intermediate",
+    "pattern_type": "architectural",
+    "when_to_use": [
+      "user wants to avoid fan-out (row multiplication) by aggregating child tables before joining",
+      "user’s question includes 'pre-aggregate order_items', 'sum before join'",
+      "preparing for one-to-one joins to avoid duplicate counting",
+      "performance optimization before JOIN on one-to-many relationships"
+    ],
+    "when_not_to_use": [
+      "user wants to preserve *all* child rows (e.g., listing order items)",
+      "the child table has no aggregatable metrics (e.g., only text fields)",
+      "user needs *row-level* details from the child table"
+    ],
+    "related_patterns": [
+      "join_fanout_detection", "join_anti", "join_semi",
+      "cte_multi_stage_pipeline", "agg_preagg_before_join"
+    ],
+    "concept_explanation": {
+      "what_it_does": "A pre-aggregation CTE aggregates child table rows to a unique parent key (e.g., SUM(revenue) per order_id) *before* joining to the parent table. This ensures one row per parent, preventing double-counting.",
+      "mental_model": "Before joining, you have a bag of order_items (many per order). You first group items into order-sized boxes (pre-aggregate), then join orders to boxes — one box per order."
+    },
+    "template": {
+      "minimal": "-- Pre-aggregate order_items to order_id, then join\nWITH order_revenue AS (\n  SELECT order_id, SUM(quantity * unit_price) AS order_total\n  FROM order_items\n  GROUP BY order_id\n)\nSELECT o.order_id, o.order_date, COALESCE(r.order_total, 0) AS order_total\nFROM orders o\nLEFT JOIN order_revenue r ON o.order_id = r.order_id",
+      "realistic": "-- Pre-aggregate order_items to order_id, then join to orders and customers\n-- Grain: one row per order with revenue\nWITH order_revenue AS (\n  -- Pre-aggregate: one row per order\n  SELECT\n    order_id,\n    SUM(quantity * unit_price) AS order_total,\n    COUNT(*) AS item_count\n  FROM order_items\n  GROUP BY order_id\n),\ncustomer_orders AS (\n  -- Join orders to pre-aggregated revenue\n  SELECT\n    o.order_id,\n    o.order_date,\n    c.customer_id,\n    c.region,\n    COALESCE(r.order_total, 0) AS order_total,\n    r.item_count\n  FROM orders o\n  JOIN customers c ON o.customer_id = c.customer_id\n  LEFT JOIN order_revenue r ON o.order_id = r.order_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n)\nSELECT\n  region,\n  COUNT(*) AS order_count,\n  SUM(order_total) AS total_revenue,\n  AVG(item_count) AS avg_items_per_order\nFROM customer_orders\nGROUP BY region",
+      "composable": "-- Pre-aggregate order_items to order_id, then join to products for category revenue\n-- Composes: cte_preagg_before_join + agg_group_rollup\nWITH order_revenue AS (\n  SELECT\n    order_id,\n    SUM(quantity * oi.unit_price) AS order_total,\n    oi.product_id\n  FROM order_items oi\n  GROUP BY order_id, oi.product_id\n),\norder_products AS (\n  SELECT\n    o.order_id,\n    p.category\n  FROM orders o\n  JOIN order_revenue r ON o.order_id = r.order_id\n  JOIN products p ON r.product_id = p.product_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n)\nSELECT\n  category,\n  COUNT(*) AS order_count,\n  SUM(order_total) AS revenue\nFROM order_products\nJOIN order_revenue USING (order_id)\nGROUP BY ROLLUP(category)"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Pre-aggregating on non-unique key",
+        "what_goes_wrong": "If pre-aggregation uses a non-unique key (e.g., customer_id instead of order_id), multiple orders get summed into one — causing under-counting and loss of order-level detail.",
+        "symptom": "Revenue totals are too low — e.g., one order_total per customer, even though a customer made 5 orders.",
+        "bad_sql": "WITH customer_revenue AS (\n  SELECT customer_id, SUM(oi.quantity * oi.unit_price) AS total\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  GROUP BY customer_id  -- ❌ wrong grain\n)\nSELECT SUM(total) FROM customer_revenue",
+        "good_sql": "WITH order_revenue AS (\n  SELECT order_id, SUM(oi.quantity * oi.unit_price) AS total\n  FROM order_items\n  GROUP BY order_id  -- ✅ grain = order_id\n)\nSELECT SUM(total) FROM order_revenue",
+        "detection_sql": "SELECT customer_id, COUNT(*) AS order_count\nFROM orders\nGROUP BY customer_id\nHAVING COUNT(*) > 1\nORDER BY order_count DESC LIMIT 5"
+      },
+      {
+        "mistake": "Pre-aggregating *after* JOIN",
+        "what_goes_wrong": "If pre-aggregation happens *after* the fan-out JOIN, the aggregation still counts duplicates — defeating the purpose. Pre-aggregation must happen *before* JOIN.",
+        "symptom": "Fan-out still causes double-counting — e.g., SUM(order_total) uses pre-aggregated table, but that table is joined to orders *again*, duplicating orders.",
+        "bad_sql": "SELECT SUM(order_total) FROM (\n  SELECT o.order_id, SUM(oi.quantity * oi.unit_price) AS order_total\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  GROUP BY o.order_id  -- ❌ fan-out occurs before aggregation\n) t",
+        "good_sql": "WITH order_revenue AS (\n  SELECT order_id, SUM(oi.quantity * oi.unit_price) AS order_total\n  FROM order_items\n  GROUP BY order_id  -- ✅ pre-aggregate before JOIN\n)\nSELECT SUM(order_total) FROM order_revenue",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT o.order_id, SUM(oi.quantity * oi.unit_price) AS order_total\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  GROUP BY o.order_id\n) t"
+      },
+      {
+        "mistake": "Omitting COALESCE for LEFT JOIN NULLs",
+        "what_goes_wrong": "Orders without items get NULL order_total from pre-aggregation. If SUM(order_total) is used, NULLs cause the total to be NULL or unexpected.",
+        "symptom": "SUM(order_total) is NULL for some regions, even though orders exist.",
+        "bad_sql": "SELECT region, SUM(order_total) FROM joined GROUP BY region",
+        "good_sql": "SELECT region, SUM(COALESCE(order_total, 0)) FROM joined GROUP BY region",
+        "detection_sql": "SELECT COUNT(*) FROM joined WHERE order_total IS NULL"
+      },
+      {
+        "mistake": "Pre-aggregating non-numeric columns",
+        "what_goes_wrong": "Non-numeric columns (e.g., product_name) can’t be aggregated with SUM/COUNT. Using STRING_AGG or MAX may produce inconsistent results if multiple rows exist.",
+        "symptom": "STRING_AGG(product_name) returns a random string from the group — not all items.",
+        "bad_sql": "WITH order_items AS (\n  SELECT order_id, product_name\n  FROM order_items\n  GROUP BY order_id\n)  -- ❌ product_name ambiguous\nSELECT * FROM order_items",
+        "good_sql": "WITH order_items AS (\n  SELECT order_id, STRING_AGG(DISTINCT product_name, ', ') AS products\n  FROM order_items\n  GROUP BY order_id\n)\nSELECT * FROM order_items",
+        "detection_sql": "SELECT order_id, COUNT(*) AS item_count\nFROM order_items\nGROUP BY order_id\nHAVING COUNT(*) > 1"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "DuckDB CTE materialization in pre-agg",
+        "duckdb_behavior": "DuckDB may materialize pre-aggregation CTEs if reused — but it’s not guaranteed. Test with EXPLAIN.",
+        "postgres_behavior": "CTEs are not materialized — pre-aggregation re-runs each time. Use TEMP TABLE for reuse.",
+        "bigquery_behavior": "BigQuery may optimize pre-agg CTEs well.",
+        "safe_alternative": "For Postgres or repeated reuse, materialize pre-aggregated CTEs in TEMP TABLEs. For one-off queries, CTEs are fine."
+      },
+      {
+        "construct": "Pre-aggregation vs window function",
+        "duckdb_behavior": "Pre-aggregation is better for fan-out prevention; window functions (e.g., SUM OVER) still cause duplication in final aggregates.",
+        "postgres_behavior": "Same — window functions don’t prevent fan-out.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Use pre-aggregation CTEs before JOINs to avoid fan-out. Use window functions only for row-level calculations (e.g., running totals per order)."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user’s query has one-to-many relationships (e.g., orders → order_items)",
+        "user needs *aggregated metrics* from the child table (e.g., SUM, COUNT)",
+        "user’s question includes 'pre-aggregate order_items', 'sum before join'",
+        "performance is critical and fan-out causes OOM"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants *all* child rows (e.g., listing order items)",
+          "use_instead": "join_inner",
+          "why": "Fan-out is expected and correct — preserve all rows"
+        },
+        {
+          "condition": "user needs *row-level* details from child table",
+          "use_instead": "join_inner",
+          "why": "Pre-aggregation loses granularity"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "pre-aggregate", "agg before join", "sum before join",
+        "fan-out prevention", "one-to-one join"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Child table is empty",
+        "what_happens": "Pre-aggregation CTE returns 0 rows, so LEFT JOIN to orders shows NULLs. COALESCE handles it.",
+        "handling": "No issue — COALESCE ensures 0 or empty string for missing data."
+      },
+      {
+        "scenario": "Child table has NULLs in grouping key",
+        "what_happens": "GROUP BY ignores NULLs — orders with NULL order_id are excluded from pre-aggregation.",
+        "handling": "Replace NULLs with sentinels or filter NULLs before pre-aggregation."
+      },
+      {
+        "scenario": "Child table has non-unique keys but pre-aggregation uses DISTINCT",
+        "what_happens": "Pre-aggregation works with COUNT(DISTINCT ...) but may be slower than expected.",
+        "handling": "Use COUNT(*) if duplicates are expected; use COUNT(DISTINCT ...) only if uniqueness is required."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n + m) where n = parent rows, m = child rows + GROUP BY. Pre-aggregation is faster than O(n × m) fan-out.",
+      "when_slow": "Very large child tables (e.g., 100M items) — GROUP BY can be costly.",
+      "optimization hint": "Filter child rows *before* pre-aggregation (e.g., WHERE order_date > ...). Index the grouping key. Materialize in TEMP TABLE if reused."
+    }
+  },
+  {
+    "id": "cte_reuse",
+    "title": "Reusable CTE Referenced Multiple Times",
+    "intent_tags": [
+      "CTE reuse", "reuse CTE", "multiple CTE references",
+      "CTE optimization", "materialize CTE", "CTE performance",
+      "DuckDB CTE", "Postgres CTE", "recompute CTE"
+    ],
+    "sql_features": ["cte", "subquery", "join", "union_all"],
+    "difficulty": "advanced",
+    "pattern_type": "architectural",
+    "when_to_use": [
+      "user wants to define a CTE *once* and reference it multiple times",
+      "user’s question includes 'can I reuse CTE?', 'CTE referenced twice'",
+      "optimizing for readability by avoiding CTE duplication",
+      "deciding whether CTE reuse is safe (no recomputation)"
+    ],
+    "when_not_to_use": [
+      "user’s engine materializes CTEs (e.g., DuckDB may, Postgres won’t)",
+      "performance is critical and CTE is reused many times — use TEMP TABLE instead",
+      "CTE has non-deterministic functions (e.g., RANDOM()) — reuse may cause inconsistency"
+    ],
+    "related_patterns": [
+      "cte_vs_subquery", "cte_preagg_before_join", "cte_multi_stage_pipeline",
+      "cte_recursive", "agg_preagg_before_join"
+    ],
+    "concept_explanation": {
+      "what_it_does": "A CTE defined once can be referenced in multiple downstream CTEs or the final SELECT. However, performance varies by engine: Postgres re-runs the CTE each time, while DuckDB may materialize it. The key is whether the CTE is 'inlined' or 'materialized'.",
+      "mental_model": "Imagine writing a function: in Postgres, each call re-runs the function body; in DuckDB, it may compile and cache the result. Reuse is safe, but not always efficient."
+    },
+    "template": {
+      "minimal": "-- Reuse CTE in multiple places\nWITH base AS (SELECT customer_id, SUM(revenue) AS total_revenue FROM orders GROUP BY customer_id)\nSELECT * FROM base WHERE total_revenue > 1000  -- first use\nUNION ALL\nSELECT * FROM base WHERE total_revenue > 5000;  -- second use",
+      "realistic": "-- Reuse customer revenue CTE for multiple analyses\n-- Grain: one row per customer, reused for filtering and aggregation\nWITH customer_revenue AS (\n  SELECT\n    c.customer_id,\n    c.email,\n    SUM(oi.quantity * oi.unit_price) AS total_revenue\n  FROM customers c\n  JOIN orders o ON c.customer_id = o.customer_id\n  JOIN order_items oi ON o.order_id = oi.order_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days'\n  GROUP BY c.customer_id, c.email\n),\nhigh_value AS (\n  SELECT * FROM customer_revenue WHERE total_revenue > 10000  -- reuse\n),\nregion_analysis AS (\n  SELECT\n    c.region,\n    COUNT(*) AS customer_count,\n    SUM(cr.total_revenue) AS revenue\n  FROM customers c\n  JOIN customer_revenue cr ON c.customer_id = cr.customer_id  -- reuse\n  GROUP BY c.region\n)\nSELECT 'high_value_customers' AS analysis, COUNT(*) AS count FROM high_value\nUNION ALL\nSELECT 'region_summary', COUNT(*) FROM region_analysis",
+      "composable": "-- Reuse base_orders CTE for multiple analyses with filters\n-- Composes: cte_reuse + agg_group_rollup\nWITH base_orders AS (\n  SELECT\n    o.order_id,\n    o.order_date,\n    c.region,\n    SUM(oi.quantity * oi.unit_price) AS order_revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY o.order_id, o.order_date, c.region\n),\nhigh_rev_orders AS (\n  SELECT * FROM base_orders WHERE order_revenue > 500  -- reuse\n),\nlow_rev_orders AS (\n  SELECT * FROM base_orders WHERE order_revenue < 50  -- reuse\n)\nSELECT\n  'high_rev' AS category,\n  region,\n  COUNT(*) AS order_count,\n  SUM(order_revenue) AS total_revenue\nFROM high_rev_orders\nGROUP BY region\nUNION ALL\nSELECT\n  'low_rev',\n  region,\n  COUNT(*),\n  SUM(order_revenue)\nFROM low_rev_orders\nGROUP BY region"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Assuming Postgres materializes reused CTEs",
+        "what_goes_wrong": "Postgres re-runs CTEs for each reference — if a CTE is reused 5 times, it runs 5 times. Users expect 'materialized' reuse and get O(n) slowdown.",
+        "symptom": "CTE-heavy queries run slower than expected — e.g., 30s vs 5s.",
+        "bad_sql": "WITH expensive_cte AS (SELECT ... FROM orders JOIN customers ...)\nSELECT * FROM expensive_cte WHERE ...  -- re-run\nUNION ALL\nSELECT * FROM expensive_cte WHERE ...;  -- re-run again",
+        "good_sql": "-- For Postgres, materialize:\nCREATE TEMP TABLE expensive_cte AS SELECT ... FROM orders JOIN customers ...;\nSELECT * FROM expensive_cte WHERE ...;\nUNION ALL\nSELECT * FROM expensive_cte WHERE ...;",
+        "detection_sql": "EXPLAIN SELECT * FROM (\n  WITH expensive_cte AS (...) SELECT * FROM expensive_cte WHERE ...\n  UNION ALL\n  SELECT * FROM expensive_cte WHERE ...\n) LIMIT 1"
+      },
+      {
+        "mistake": "Non-deterministic functions in reused CTEs",
+        "what_goes_wrong": "If CTE uses RANDOM(), each reference may produce different values — the CTE is re-evaluated each time.",
+        "symptom": "Two queries on the same CTE return different 'random' values — hard to debug.",
+        "bad_sql": "WITH random_sample AS (\n  SELECT * FROM orders TABLESAMPLE SYSTEM (10 PERCENT)  -- DuckDB: may re-sample each time\n)\nSELECT * FROM random_sample WHERE ...  -- sample A\nUNION ALL\nSELECT * FROM random_sample WHERE ...;  -- sample B",
+        "good_sql": "-- Materialize first to fix the sample:\nCREATE TEMP TABLE random_sample AS SELECT * FROM orders TABLESAMPLE SYSTEM (10 PERCENT);\nSELECT * FROM random_sample WHERE ...\nUNION ALL\nSELECT * FROM random_sample WHERE ...;",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  WITH random_sample AS (\n    SELECT *, RANDOM() AS r FROM orders TABLESAMPLE SYSTEM (10 PERCENT)\n  )\n  SELECT * FROM random_sample WHERE r > 0.5  -- reuse\n  UNION ALL\n  SELECT * FROM random_sample WHERE r > 0.5\n) t"
+      },
+      {
+        "mistake": "CTE reuse without clear intent",
+        "what_goes_wrong": "Users add CTE reuse for aesthetics but don’t test performance, causing hidden overhead in production.",
+        "symptom": "CTE reuse works in dev but slows in prod on large data.",
+        "bad_sql": "WITH base AS (SELECT * FROM very_large_table)\nSELECT * FROM base WHERE ...  -- reuse\nUNION ALL\nSELECT * FROM base WHERE ...;  -- reuse",
+        "good_sql": "-- For small data or one-off queries, CTE reuse is fine. For large data or repeated reuse:\nCREATE TEMP TABLE base AS SELECT * FROM very_large_table;\nSELECT * FROM base WHERE ...;\nUNION ALL\nSELECT * FROM base WHERE ...;",
+        "detection_sql": "SELECT COUNT(*) FROM base  -- check table size"
+      },
+      {
+        "mistake": "CTE reuse with stateful functions (e.g., sequence.nextval)",
+        "what_goes_wrong": "Sequence functions may advance on each CTE reference, causing inconsistent numbering.",
+        "symptom": "Row numbers jump unexpectedly, or IDs are not sequential.",
+        "bad_sql": "WITH numbered AS (\n  SELECT nextval('order_seq') AS id, * FROM orders\n)\nSELECT * FROM numbered WHERE ...  -- seq advance A\nUNION ALL\nSELECT * FROM numbered WHERE ...;  -- seq advance B",
+        "good_sql": "-- Materialize first to fix IDs:\nCREATE TEMP TABLE numbered AS SELECT nextval('order_seq') AS id, * FROM orders;\nSELECT * FROM numbered WHERE ...\nUNION ALL\nSELECT * FROM numbered WHERE ...;",
+        "detection_sql": "SELECT id, COUNT(*) FROM numbered GROUP BY id HAVING COUNT(*) > 1  -- ID uniqueness violation"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "DuckDB vs Postgres CTE reuse performance",
+        "duckdb_behavior": "DuckDB may materialize reused CTEs automatically — performance is often good for reuse.",
+        "postgres_behavior": "CTEs are *never* materialized — each reference re-runs the query.",
+        "bigquery_behavior": "BigQuery may optimize reuse well — test with EXPLAIN.",
+        "safe_alternative": "For Postgres, use TEMP TABLE for reused CTEs. For DuckDB/BigQuery, CTE reuse is usually safe — but profile with EXPLAIN."
+      },
+      {
+        "construct": "CTE reuse with window functions",
+        "duckdb_behavior": "Window functions in reused CTEs may recompute — test if partitioning is heavy.",
+        "postgres_behavior": "Window functions recompute for each reference — expensive.",
+        "bigquery_behavior": "Same as Postgres.",
+        "safe_alternative": "If window functions are expensive, materialize the base CTE first. Or use QUALIFY in DuckDB for one-pass filtering."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user’s query has *complex logic* that would be duplicated without CTE reuse",
+        "user’s engine *may* materialize CTEs (e.g., DuckDB, BigQuery)",
+        "user wants *readability* and reuse is light (1-2 times)",
+        "performance testing shows CTE reuse is acceptable"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user’s engine is Postgres (no materialization)",
+          "use_instead": "cte_materialize",
+          "why": "TEMP TABLEs ensure one-time computation"
+        },
+        {
+          "condition": "CTE has non-deterministic functions or heavy window functions",
+          "use_instead": "temp_table",
+          "why": "TEMP TABLE fixes values and avoids recomputation"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "CTE reuse", "reuse CTE", "referenced twice",
+        "materialize CTE", "DuckDB CTE"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "CTE referenced in subquery",
+        "what_happens": "In Postgres, CTEs aren’t in-scope for subqueries — error. In DuckDB, they may be available.",
+        "handling": "Move subquery logic into a CTE or use a JOIN instead."
+      },
+      {
+        "scenario": "CTE is very large (>10M rows)",
+        "what_happens": "Reuse without materialization causes O(n × k) overhead — slow.",
+        "handling": "Materialize in TEMP TABLE or filter early to reduce size."
+      },
+      {
+        "scenario": "CTE has ORDER BY but is reused",
+        "what_happens": "ORDER BY is not guaranteed across references — each reference may sort differently.",
+        "handling": "Add ORDER BY to the final SELECT only, or materialize CTE and add ORDER BY after."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "Postgres: O(n × k) where k = reuse count. DuckDB: O(n) if materialized, O(n × k) if not.",
+      "when_slow": "Postgres with reused CTEs, or DuckDB with very large intermediate tables and high reuse.",
+      "optimization hint": "For Postgres or heavy reuse (>2), use TEMP TABLE. For DuckDB, CTE reuse is usually fine — but profile with EXPLAIN to confirm."
+    }
+  }
+]

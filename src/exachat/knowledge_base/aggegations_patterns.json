@@ -1,0 +1,940 @@
+[
+  {
+    "id": "agg_group_rollup",
+    "title": "GROUP BY with ROLLUP",
+    "intent_tags": [
+      "subtotal", "hierarchical total", "grand total", "subtotals", "total plus",
+      "grouping sets", "summary report", "drill-down", "hierarchy totals",
+      "subtotals by category", "level totals", "breakdown", "hierarchical subtotal",
+      "total by group", "subtotals + grand total"
+    ],
+    "sql_features": ["group_by", "rollup", "cte", "grouping"],
+    "difficulty": "intermediate",
+    "pattern_type": "aggregation",
+    "when_to_use": [
+      "user wants hierarchical subtotals *and* a grand total in one query (e.g., revenue by region, by country, and total)",
+      "building a summary report where each level has its own subtotal (e.g., country-level revenue + grand total)",
+      "user’s question includes 'subtotal', 'by region then country', 'drill-down'",
+      "reporting needs to show total for each group and a final grand total row",
+      "generating a pivot-style summary where levels share the same row structure"
+    ],
+    "when_not_to_use": [
+      "user only wants the grand total — use GROUP BY () or aggregate without GROUP BY instead",
+      "user wants arbitrary subtotal combinations (e.g., region + country, but not country alone) — use GROUPING SETS instead",
+      "user needs *all* dimension combinations (e.g., A×B×C for 8 combinations) — use CUBE instead",
+      "user wants to identify subtotal rows programmatically — ROLLUP NULLs are ambiguous; GROUPING SETS with labels are clearer"
+    ],
+    "related_patterns": [
+      "agg_group_cube", "agg_group_grouping_sets", "agg_conditional",
+      "agg_having_vs_where", "seg_case_when"
+    ],
+    "concept_explanation": {
+      "what_it_does": "GROUP BY ROLLUP(A, B, C) produces a hierarchy of aggregations: (A,B,C) → (A,B) → (A) → (), generating subtotals at each level plus a grand total. NULL values in higher levels indicate subtotal rows for that group.",
+      "mental_model": "Imagine a pyramid of aggregations. At the base, you have detailed rows (A,B,C). Next level up, you aggregate out C (keeping A,B totals). Then aggregate out B (A totals). Finally, the apex is the grand total. NULLs in a column indicate that column has been 'rolled up' at that level.",
+      "key_behavior": "ROLLUP follows the *order* of columns: it rolls up from right to left. GROUP BY ROLLUP(A,B) produces (A,B), (A), () — not (B) alone. Use GROUPING SETS for non-hierarchical or left-to-right rollups."
+    },
+    "template": {
+      "minimal": "-- Revenue subtotal by category and subcategory, plus grand total\nSELECT\n  category,\n  subcategory,\n  SUM(revenue) AS revenue\nFROM sales\nGROUP BY ROLLUP(category, subcategory)\nORDER BY category NULLS LAST, subcategory NULLS LAST",
+      "realistic": "-- Revenue subtotals by country and region, with GROUPING() to label subtotal rows\n-- Grain: one row per category/subcategory, plus subtotal rows\nWITH sales_summary AS (\n  SELECT\n    c.region,\n    c.country,\n    p.category,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days'\n  GROUP BY c.region, c.country, p.category\n)\nSELECT\n  GROUPING(region) AS is_region_total,\n  GROUPING(country) AS is_country_total,\n  GROUPING(category) AS is_category_total,\n  COALESCE(region, 'All Regions') AS region,\n  COALESCE(country, 'All Countries') AS country,\n  COALESCE(category, 'All Categories') AS category,\n  revenue\nFROM sales_summary\nGROUP BY ROLLUP(region, country, category)\nORDER BY\n  is_region_total,\n  region NULLS LAST,\n  is_country_total,\n  country NULLS LAST,\n  is_category_total,\n  category",
+      "composable": "-- Revenue subtotals by region and category, then classify each row as detail/subtotal/grand_total\n-- Composes: agg_group_rollup + seg_case_when_classification\nWITH rollup AS (\n  SELECT\n    c.region,\n    p.category,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY ROLLUP(region, category)\n)\nSELECT\n  region,\n  category,\n  revenue,\n  CASE\n    WHEN GROUPING(region) = 0 AND GROUPING(category) = 0 THEN 'detail'\n    WHEN GROUPING(region) = 0 AND GROUPING(category) = 1 THEN 'region subtotal'\n    ELSE 'grand_total'\n  END AS row_type\nFROM rollup\nORDER BY GROUPING(region), region NULLS LAST, GROUPING(category), category"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Assuming ROLLUP(A,B) produces (B) alone",
+        "what_goes_wrong": "ROLLUP follows strict *right-to-left* ordering. ROLLUP(A,B) generates (A,B), (A), () — it never produces (B) alone. Users expecting B-level totals are surprised to find them missing.",
+        "symptom": "Missing subtotal for subcategory alone. User expects subcategory-level totals but sees only category-level and grand total.",
+        "bad_sql": "SELECT category, subcategory, SUM(revenue) FROM sales GROUP BY ROLLUP(category, subcategory)",
+        "good_sql": "-- To include both category and subcategory totals, add them explicitly:\nSELECT category, subcategory, SUM(revenue)\nFROM sales\nGROUP BY GROUPING SETS ((category, subcategory), (category), (subcategory), ())",
+        "detection_sql": "SELECT category, COUNT(*) FROM (\n  SELECT category, subcategory, GROUPING(category) AS g_cat, GROUPING(subcategory) AS g_sub\n  FROM sales\n  GROUP BY ROLLUP(category, subcategory)\n) WHERE g_sub = 0 AND g_cat = 1\nGROUP BY category\nHAVING COUNT(*) = 0"
+      },
+      {
+        "mistake": "Confusing NULL as a real value vs NULL as subtotal sentinel",
+        "what_goes_wrong": "In ROLLUP, NULL in the category column means 'subtotal across all categories', but a literal NULL in the data (e.g., unknown category) also appears as NULL. There is no way to distinguish them without GROUPING().",
+        "symptom": "The 'All Categories' subtotal row contains NULL, but so do rows with unknown category data — leading to ambiguous interpretation.",
+        "bad_sql": "SELECT category, subcategory, SUM(revenue)\nFROM sales\nGROUP BY ROLLUP(category, subcategory)\nORDER BY category, subcategory",
+        "good_sql": "SELECT\n  COALESCE(category, 'All Categories') AS category,\n  COALESCE(subcategory, 'All Subcategories') AS subcategory,\n  GROUPING(category) AS is_cat_total,\n  GROUPING(subcategory) AS is_subcat_total,\n  SUM(revenue) AS revenue\nFROM sales\nGROUP BY ROLLUP(category, subcategory)\nORDER BY is_cat_total, category NULLS LAST, is_subcat_total, subcategory NULLS LAST",
+        "detection_sql": "-- Find rows where category = 'All Categories' vs literal NULL\nWITH rollup AS (\n  SELECT category, SUM(revenue) AS revenue, GROUPING(category) AS g_cat\n  FROM sales\n  GROUP BY ROLLUP(category)\n)\nSELECT g_cat, category, SUM(revenue) FROM rollup GROUP BY 1, 2"
+      },
+      {
+        "mistake": "Using ROLLUP when only a grand total is needed",
+        "what_goes_wrong": "ROLLUP generates multiple levels of aggregation, including detail rows and subtotals. If only the grand total is needed, this is overkill and slower than GROUP BY () or aggregate without GROUP BY.",
+        "symptom": "Query returns more rows than needed and takes longer than necessary.",
+        "bad_sql": "SELECT SUM(revenue) FROM sales GROUP BY ROLLUP(category)",
+        "good_sql": "-- Option 1: Aggregate without GROUP BY\nSELECT SUM(revenue) AS grand_total FROM sales\n-- Option 2: GROUP BY () explicitly\nSELECT SUM(revenue) AS grand_total FROM sales GROUP BY ()",
+        "detection_sql": "SELECT COUNT(*) FROM sales GROUP BY ROLLUP(category)  -- should be small for just grand total"
+      },
+      {
+        "mistake": "Omitting GROUPING() and relying on COALESCE alone",
+        "what_goes_wrong": "Without GROUPING(), COALESCE hides the distinction between a real NULL value and a subtotal sentinel. Later analysis may mistake unknown-category data for an aggregate row.",
+        "symptom": "Downstream reports show 'All Categories' revenue mixed with unknown-category revenue, or vice versa.",
+        "bad_sql": "SELECT COALESCE(category, 'All Categories') AS category, SUM(revenue)\nFROM sales\nGROUP BY ROLLUP(category)",
+        "good_sql": "SELECT\n  COALESCE(category, 'All Categories') AS category,\n  GROUPING(category) AS is_total,\n  SUM(revenue) AS revenue\nFROM sales\nGROUP BY ROLLUP(category)",
+        "detection_sql": "SELECT category, GROUPING(category) AS g_cat, COUNT(*)\nFROM (\n  SELECT category, SUM(revenue) AS revenue, GROUPING(category) AS g_cat\n  FROM sales\n  GROUP BY ROLLUP(category)\n) GROUP BY category, g_cat"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "ROLLUP in Postgres vs DuckDB",
+        "duckdb_behavior": "DuckDB fully supports ROLLUP syntax. GROUPING() and GROUPING() functions work as expected.",
+        "postgres_behavior": "Postgres supports ROLLUP and GROUPING(), but older versions may have bugs with complex expressions.",
+        "bigquery_behavior": "BigQuery supports ROLLUP and GROUPING(). Also supports GROUPING_ID() as shorthand.",
+        "safe_alternative": "Use ROLLUP if targeting modern DuckDB/Postgres/BigQuery. For maximum portability (e.g., to older engines), use GROUPING SETS explicitly."
+      },
+      {
+        "construct": "ORDER BY with ROLLUP NULL handling",
+        "duckdb_behavior": "ORDER BY sorts NULLs last by default in ascending order. Since subtotal NULLs appear in higher levels, using NULLS FIRST may push subtotal rows to the top.",
+        "postgres_behavior": "Same default behavior.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Explicitly order by GROUPING(column) first, then column: ORDER BY GROUPING(category) ASC, category NULLS LAST to keep detail rows above subtotals."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants *hierarchical* subtotals (e.g., country → region → grand total)",
+        "columns have a clear nesting relationship (A contains B contains C)",
+        "user’s question includes 'by country then region', 'drill-down', 'subtotal per group'",
+        "user wants one query instead of multiple UNIONed subtotals"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants arbitrary subtotal combinations, not hierarchical",
+          "use_instead": "agg_group_grouping_sets",
+          "why": "GROUPING SETS lets you specify exactly which combinations to include (e.g., A×B, A, B, () but not A×C)"
+        },
+        {
+          "condition": "user wants *all* combinations (e.g., region, country, category → 8 combinations)",
+          "use_instead": "agg_group_cube",
+          "why": "CUBE generates the full cartesian power set, while ROLLUP only goes right-to-left"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "subtotal", "drill-down", "hierarchical", "by region then country",
+        "and grand total", "level by level", "summary by"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Partition key contains literal NULLs",
+        "what_happens": "Literal NULLs appear in the detail rows, while subtotal NULLs (for rolled-up levels) also appear — indistinguishable without GROUPING().",
+        "handling": "Replace literal NULLs with a sentinel (e.g., 'Unknown') *before* aggregation, then use GROUPING() to label subtotals. Or use GROUPING_ID() if available."
+      },
+      {
+        "scenario": "ROLLUP with a single column",
+        "what_happens": "Produces (A) and () — i.e., group totals plus grand total. Same as GROUPING SETS ((A), ()).",
+        "handling": "No change needed. It works correctly. Use GROUPING(A) to distinguish group totals from grand total."
+      },
+      {
+        "scenario": "Columns have high cardinality",
+        "what_happens": "ROLLUP can generate many rows (e.g., 100 categories × 3 levels = 300+ rows), even if the base table is large.",
+        "handling": "Pre-filter to relevant dimensions in a CTE before ROLLUP. Or use CUBE only for high-value, low-cardinality dimensions."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n + m) — where n = base rows, m = output rows (for ROLLUP, m = product of (cardinality_i + 1) for i columns).",
+      "when_slow": "High-cardinality dimensions (e.g., 10k products × 100 regions) produce many subtotal rows, causing large intermediate tables.",
+      "optimization_hint": "Filter base data *before* ROLLUP to reduce row count. If only a few levels are needed, prefer GROUPING SETS over ROLLUP for targeted subtotals."
+    }
+  },
+  {
+    "id": "agg_group_cube",
+    "title": "GROUP BY with CUBE",
+    "intent_tags": [
+      "all combinations", "OLAP", "multi-dimensional", "all groups", "full aggregation",
+      "cross-tab", "pivot", "all dimensions", "cartesian", "every combo",
+      "every possible subtotal", "full subtotal", "all levels"
+    ],
+    "sql_features": ["group_by", "cube", "cte", "grouping", "grouping_id"],
+    "difficulty": "advanced",
+    "pattern_type": "aggregation",
+    "when_to_use": [
+      "user wants *all possible combinations* of group-by columns (e.g., region, country, category → 8 combinations)",
+      "building an OLAP cube or pivot table for interactive analysis",
+      "user’s question includes 'every combination', 'all possible subtotals', 'cross-tab'",
+      "generating comprehensive reports where users might drill into any dimension combination"
+    ],
+    "when_not_to_use": [
+      "user only wants specific subtotal combinations — use GROUPING SETS instead",
+      "user wants hierarchical subtotals — use ROLLUP for cleaner semantics",
+      "high dimensionality (e.g., >5 columns) — CUBE output explodes (2^k rows for k columns)",
+      "performance is critical and dimensions have high cardinality — CUBE can generate millions of rows"
+    ],
+    "related_patterns": [
+      "agg_group_rollup", "agg_group_grouping_sets", "agg_conditional",
+      "agg_having_vs_where", "agg_pivot"
+    ],
+    "concept_explanation": {
+      "what_it_does": "GROUP BY CUBE(A, B, C) generates *all* 2^k combinations of the columns: (A,B,C), (A,B), (A,C), (B,C), (A), (B), (C), (). Each combination is a separate subtotal level, enabling any subset of dimensions to be 'rolled up'.",
+      "mental_model": "Imagine flipping switches: each column is a switch that can be 'on' (grouped) or 'off' (rolled up). CUBE tries every combination: all switches on (detailed), A only, B only, C only, A+B, A+C, B+C, and all off (grand total).",
+      "key_behavior": "CUBE generates *2^k* subtotal levels for k columns. It includes *every possible subset*, not just hierarchical ones. Use GROUPING() or GROUPING_ID() to identify which combination each row represents."
+    },
+    "template": {
+      "minimal": "-- All combinations of region and category\nSELECT\n  region,\n  category,\n  SUM(revenue) AS revenue\nFROM sales\nGROUP BY CUBE(region, category)\nORDER BY GROUPING(region), region NULLS LAST, GROUPING(category), category",
+      "realistic": "-- All combinations of region, country, and category — 8 combinations total\n-- Grain: one row per dimension combination\nWITH sales_summary AS (\n  SELECT\n    c.region,\n    c.country,\n    p.category,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY c.region, c.country, p.category\n)\nSELECT\n  GROUPING_ID(region, country, category) AS level_id,\n  COALESCE(region, 'All Regions') AS region,\n  COALESCE(country, 'All Countries') AS country,\n  COALESCE(category, 'All Categories') AS category,\n  revenue\nFROM sales_summary\nGROUP BY CUBE(region, country, category)\nORDER BY level_id, region, country, category",
+      "composable": "-- Generate a pivot-style summary: revenue by region (column) and category (row), plus margins\n-- Composes: agg_group_cube + agg_pivot + agg_conditional\nWITH cube AS (\n  SELECT\n    c.region,\n    p.category,\n    SUM(oi.quantity * oi.unit_price) AS revenue,\n    SUM(oi.quantity * oi.unit_cost) AS cost\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY CUBE(region, category)\n),\npivoted AS (\n  SELECT\n    category,\n    SUM(revenue) FILTER (WHERE region = 'North') AS north_revenue,\n    SUM(revenue) FILTER (WHERE region = 'South') AS south_revenue,\n    SUM(revenue) FILTER (WHERE region = 'East') AS east_revenue,\n    SUM(revenue) FILTER (WHERE region = 'West') AS west_revenue,\n    SUM(revenue) AS total_revenue\n  FROM cube\n  WHERE GROUPING(region) = 0 AND GROUPING(category) = 0  -- detail rows only\n  GROUP BY category\n)\nSELECT\n  category,\n  north_revenue,\n  south_revenue,\n  east_revenue,\n  west_revenue,\n  total_revenue,\n  ROUND((total_revenue - SUM(cost) FILTER (WHERE region IS NULL)) / NULLIF(total_revenue, 0) * 100, 2) AS margin_pct\nFROM pivoted\nJOIN (\n  SELECT SUM(cost) AS total_cost\n  FROM cube\n  WHERE GROUPING(region) = 1 AND GROUPING(category) = 0\n) cost_sub ON true"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Ignoring 2^k explosion in output rows",
+        "what_goes_wrong": "With k columns, CUBE produces 2^k subtotal levels. For 5 columns, that’s 32 rows per group — often far more than needed. If dimensions have high cardinality (e.g., 10k products × 100 regions), CUBE can generate billions of rows.",
+        "symptom": "Query runs for minutes, returns millions of rows, and the BI tool crashes when loading the result.",
+        "bad_sql": "SELECT region, country, category, subcategory, brand, SUM(revenue)\nFROM sales\nGROUP BY CUBE(region, country, category, subcategory, brand)",
+        "good_sql": "-- Pre-filter to top dimensions or use GROUPING SETS with explicit combos:\nWITH top_products AS (\n  SELECT product_id, SUM(revenue) AS revenue\n  FROM sales\n  WHERE order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY product_id\n  ORDER BY revenue DESC\n  LIMIT 100\n)\nSELECT region, category, brand, SUM(revenue)\nFROM sales\nWHERE product_id IN (SELECT product_id FROM top_products)\nGROUP BY CUBE(region, category, brand)",
+        "detection_sql": "-- Estimate CUBE output size before running:\nSELECT (2^5) * COUNT(DISTINCT region) * COUNT(DISTINCT country) * COUNT(DISTINCT category) * COUNT(DISTINCT subcategory) * COUNT(DISTINCT brand) AS estimated_rows\nFROM sales"
+      },
+      {
+        "mistake": "Assuming CUBE includes ROLLUP-style hierarchical order",
+        "what_goes_wrong": "CUBE generates *all* subsets, not hierarchical ones. For example, CUBE(A,B,C) includes (A,C) — which skips B — while ROLLUP(A,B,C) would not. Users expecting hierarchical subtotals get extra non-hierarchical rows.",
+        "symptom": "User sees subtotals like 'North + Electronics' (region + category, no country) and wonders why country is missing.",
+        "bad_sql": "SELECT region, country, category, SUM(revenue)\nFROM sales\nGROUP BY CUBE(region, country, category)\nORDER BY region, country, category",
+        "good_sql": "-- To get hierarchical subtotals only, use ROLLUP:\nSELECT region, country, category, SUM(revenue)\nFROM sales\nGROUP BY ROLLUP(region, country, category)\nORDER BY region, country, category",
+        "detection_sql": "-- Check if (region, category) without country exists (CUBE-only):\nSELECT region, category, COUNT(*)\nFROM (\n  SELECT region, country, category, SUM(revenue) AS rev\n  FROM sales\n  GROUP BY CUBE(region, country, category)\n)\nWHERE GROUPING(country) = 1 AND GROUPING(region) = 0 AND GROUPING(category) = 0\nGROUP BY region, category"
+      },
+      {
+        "mistake": "Omitting GROUPING() to interpret subtotal rows",
+        "what_goes_wrong": "Without GROUPING(), NULL values could mean 'subtotal' or 'real NULL in data'. CUBE has many NULL subtotals (e.g., (region), () → region NULL), making ambiguity worse.",
+        "symptom": "Reports show 'All Regions' as NULL, but it’s impossible to distinguish from unknown-region data.",
+        "bad_sql": "SELECT region, category, SUM(revenue) FROM sales GROUP BY CUBE(region, category)",
+        "good_sql": "SELECT\n  COALESCE(region, 'All Regions') AS region,\n  COALESCE(category, 'All Categories') AS category,\n  GROUPING(region) AS g_region,\n  GROUPING(category) AS g_cat,\n  SUM(revenue) AS revenue\nFROM sales\nGROUP BY CUBE(region, category)",
+        "detection_sql": "SELECT region, category, GROUPING(region), GROUPING(category), COUNT(*)\nFROM (\n  SELECT region, category, SUM(revenue), GROUPING(region) AS g_r, GROUPING(category) AS g_c\n  FROM sales\n  GROUP BY CUBE(region, category)\n) GROUP BY 1, 2, 3, 4"
+      },
+      {
+        "mistake": "Using CUBE for low-value, high-cardinality dimensions",
+        "what_goes_wrong": "Adding a high-cardinality dimension (e.g., user_id, product_id) to CUBE multiplies output rows by that dimension’s cardinality — often making the query unusable.",
+        "symptom": "CUBE with 10 regions × 100 categories × 10k products = 10 million subtotal rows — even though only 100k detail rows exist.",
+        "bad_sql": "SELECT region, category, product_id, SUM(revenue)\nFROM sales\nGROUP BY CUBE(region, category, product_id)",
+        "good_sql": "-- Aggregate to product_id level first, then CUBE over aggregates:\nWITH prod_rev AS (\n  SELECT product_id, region, category, SUM(revenue) AS revenue\n  FROM sales\n  GROUP BY product_id, region, category\n)\nSELECT region, category, SUM(revenue) AS rev\nFROM prod_rev\nGROUP BY CUBE(region, category)",
+        "detection_sql": "SELECT COUNT(DISTINCT product_id) AS prod_cardinality FROM sales"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "GROUPING_ID() availability",
+        "duckdb_behavior": "DuckDB supports GROUPING_ID() as shorthand for GROUPING() + binary interpretation.",
+        "postgres_behavior": "Postgres supports GROUPING_ID() from 14.0 onward. Older versions require GROUPING() + manual bit math.",
+        "bigquery_behavior": "BigQuery supports GROUPING_ID() natively.",
+        "safe_alternative": "Use GROUPING_ID(col1, col2, ...) to get a single integer encoding which columns are rolled up. For older Postgres, use SUM(POWER(2, k) * GROUPING(column)) for k=0..n-1."
+      },
+      {
+        "construct": "CUBE with ORDER BY",
+        "duckdb_behavior": "ORDER BY with GROUPING() works: ORDER BY GROUPING(region), GROUPING(category) ensures detail rows appear first, then subtotals.",
+        "postgres_behavior": "Same behavior in modern versions.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Always order by GROUPING() first, then columns: ORDER BY GROUPING(region), GROUPING(country), region NULLS LAST, country NULLS LAST to group detail rows together."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants *every possible combination* of dimensions (e.g., for OLAP tools)",
+        "dimensions have low-to-moderate cardinality (e.g., 3-4 columns, each <100 distinct values)",
+        "user’s question includes 'all combos', 'every subtotal', 'pivot table'",
+        "interactivity matters — users may want to filter by any dimension subset"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants *hierarchical* subtotals only (e.g., region → country → total)",
+          "use_instead": "agg_group_rollup",
+          "why": "ROLLUP generates only the hierarchical path, not all subsets — fewer rows and clearer semantics"
+        },
+        {
+          "condition": "user wants *specific* subtotal combinations, not all of them",
+          "use_instead": "agg_group_grouping_sets",
+          "why": "GROUPING SETS lets you list exactly which combinations to include"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "all combinations", "every subtotal", "all dimensions", "OLAP",
+        "every possible", "cross tab", "pivot style"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "All columns have NULLs",
+        "what_happens": "CUBE generates (,,), (,,), ... etc., but NULLs are indistinguishable from subtotal sentinels without GROUPING().",
+        "handling": "Replace literal NULLs with sentinels *before* aggregation. Or use GROUPING_ID() to filter for specific levels (e.g., WHERE GROUPING_ID() = 0 means all dimensions rolled up = grand total)."
+      },
+      {
+        "scenario": "Single column with CUBE",
+        "what_happens": "CUBE(A) generates (A) and () — same as ROLLUP(A).",
+        "handling": "Use GROUPING(A) to distinguish group totals (A=1) from grand total (()=0)."
+      },
+      {
+        "scenario": "Zero rows in base table",
+        "what_happens": "CUBE returns *one* row: the grand total with all NULLs and SUM=0. GROUPING() all =1.",
+        "handling": "No issue — CUBE is robust. But check GROUPING_ID() = 0 to confirm it’s the grand total."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(2^k × n / g) — where k = columns, n = rows, g = average group size. Output size = 2^k × number of unique combinations in detail rows.",
+      "when_slow": "High k (>4) or high dimension cardinality. CUBE with 5 columns × 100 values each = 32 × 100^5 = 3.2 trillion rows.",
+      "optimization_hint": "Aggregate to low-cardinality dimensions first (e.g., pre-sum by product_id), then apply CUBE over those aggregates. Never CUBE over high-cardinality keys."
+    }
+  },
+  {
+    "id": "agg_group_grouping_sets",
+    "title": "GROUPING SETS for Selective Subtotals",
+    "intent_tags": [
+      "custom subtotal", "selective subtotal", "explicit subtotal", "partial subtotal",
+      "manually define subtotals", "specific groups", "flexible subtotal",
+      "arbitrary grouping", "custom aggregation", "custom subtotal"
+    ],
+    "sql_features": ["group_by", "grouping_sets", "cte", "grouping"],
+    "difficulty": "intermediate",
+    "pattern_type": "aggregation",
+    "when_to_use": [
+      "user wants *specific* subtotal combinations (e.g., region+country, region, country — but not grand total alone)",
+      "building a report with custom subtotal structure (e.g., 'by region then country, plus subtotals by region only')",
+      "user’s question includes 'subtotal by region only', 'country alone and region+country, but not region alone'",
+      "generating flexible summaries without CUBE’s explosion or ROLLUP’s hierarchy constraint"
+    ],
+    "when_not_to_use": [
+      "user wants *all* combinations — use CUBE instead",
+      "user wants hierarchical subtotals — use ROLLUP for cleaner semantics and readability",
+      "user wants only the grand total — use GROUP BY () or aggregate without GROUP BY",
+      "dimensionality is high and subtotals are numerous — consider aggregating to a pre-computed summary table"
+    ],
+    "related_patterns": [
+      "agg_group_rollup", "agg_group_cube", "agg_conditional",
+      "agg_having_vs_where", "agg_pivot"
+    ],
+    "concept_explanation": {
+      "what_it_does": "GROUPING SETS(A, (B,C), ()) explicitly defines *which combinations* to aggregate: here, (A), (B,C), and (). This gives precise control over subtotal structure — you can skip levels, mix dimensions, or add arbitrary combinations.",
+      "mental_model": "Imagine drawing boxes around rows: one box for region-only, one box for country+category, and one global box for the grand total. GROUPING SETS tells SQL exactly which boxes to create, instead of automatically generating them (CUBE) or following a hierarchy (ROLLUP).",
+      "key_behavior": "GROUPING SETS supports *any* set of combinations. You can repeat columns, omit dimensions, or add () for grand total. Use GROUPING() or GROUPING_ID() to identify which subtotal level each row represents."
+    },
+    "template": {
+      "minimal": "-- Subtotals by region, by category, and grand total\nSELECT\n  region,\n  category,\n  SUM(revenue) AS revenue\nFROM sales\nGROUP BY GROUPING SETS ((region), (category), ())\nORDER BY GROUPING(region), region NULLS LAST, GROUPING(category), category",
+      "realistic": "-- Custom subtotal structure: region+country, region, and grand total\n-- Grain: one row per subtotal combination\nWITH sales_summary AS (\n  SELECT\n    c.region,\n    c.country,\n    p.category,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days'\n  GROUP BY c.region, c.country, p.category\n)\nSELECT\n  GROUPING(region) AS g_region,\n  GROUPING(country) AS g_country,\n  GROUPING(category) AS g_category,\n  COALESCE(region, 'All Regions') AS region,\n  COALESCE(country, 'All Countries') AS country,\n  COALESCE(category, 'All Categories') AS category,\n  revenue\nFROM sales_summary\nGROUP BY GROUPING SETS ((region, country, category), (region), ())\nORDER BY g_region, region NULLS LAST, g_country, country NULLS LAST, g_category, category",
+      "composable": "-- Revenue subtotals: region+country, region only, grand total — then pivot to region columns\n-- Composes: agg_group_grouping_sets + agg_pivot + agg_conditional\nWITH groups AS (\n  SELECT\n    c.region,\n    c.country,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY GROUPING SETS ((region, country), (region), ())\n)\nSELECT\n  GROUPING(region) AS is_region_subtotal,\n  GROUPING(country) AS is_country_subtotal,\n  COALESCE(region, 'Grand Total') AS region,\n  COALESCE(country, 'All Countries') AS country,\n  SUM(revenue) FILTER (WHERE GROUPING(region) = 0 AND GROUPING(country) = 0) AS region_country_rev,\n  SUM(revenue) FILTER (WHERE GROUPING(region) = 0 AND GROUPING(country) = 1) AS region_only_rev,\n  SUM(revenue) FILTER (WHERE GROUPING(region) = 1) AS grand_total_rev\nFROM groups\nGROUP BY GROUPING(region), GROUPING(country), region, country\nORDER BY is_region_subtotal, is_country_subtotal, region, country"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Confusing GROUPING SETS with parentheses vs commas",
+        "what_goes_wrong": "GROUPING SETS ((region), (country), ()) means three sets: {region}, {country}, {}. GROUPING SETS (region, country, ()) means one set: {region, country, ()} — which is invalid and returns only the grand total. Parentheses define *sets*, not *columns*.",
+        "symptom": "Only grand total returned — user expects region and country subtotals but gets just one row.",
+        "bad_sql": "SELECT region, country, SUM(revenue) FROM sales GROUP BY GROUPING SETS (region, country, ())",
+        "good_sql": "SELECT region, country, SUM(revenue) FROM sales GROUP BY GROUPING SETS ((region), (country), ())",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT region, country, SUM(revenue) FROM sales GROUP BY GROUPING SETS (region, country, ())\n)"
+      },
+      {
+        "mistake": "Omitting GROUPING() and misinterpreting subtotal NULLs",
+        "what_goes_wrong": "In GROUPING SETS (region), the region subtotal row has region=NULL, but so might rows with literal NULL region data. Without GROUPING(), there’s no way to distinguish them.",
+        "symptom": "Reports show 'All Regions' as NULL, but unknown-region data also appears as NULL — data loss or misinterpretation.",
+        "bad_sql": "SELECT region, SUM(revenue) FROM sales GROUP BY GROUPING SETS ((region), ())",
+        "good_sql": "SELECT\n  COALESCE(region, 'All Regions') AS region,\n  GROUPING(region) AS g_region,\n  SUM(revenue) AS revenue\nFROM sales\nGROUP BY GROUPING SETS ((region), ())",
+        "detection_sql": "SELECT region, GROUPING(region), COUNT(*)\nFROM (\n  SELECT region, SUM(revenue) AS rev, GROUPING(region) AS g_r\n  FROM sales\n  GROUP BY GROUPING SETS ((region), ())\n) GROUP BY 1, 2"
+      },
+      {
+        "mistake": "Using GROUPING SETS when ROLLUP/CUBE would be simpler",
+        "what_goes_wrong": "If the user wants hierarchical subtotals (e.g., region → country → total) or all combinations, GROUPING SETS requires manual listing, which is error-prone and verbose.",
+        "symptom": "Long GROUPING SETS list with many combinations, and manual maintenance when dimensions change.",
+        "bad_sql": "SELECT region, country, category, SUM(revenue)\nFROM sales\nGROUP BY GROUPING SETS ((region, country, category), (region, country), (region), ())",
+        "good_sql": "SELECT region, country, category, SUM(revenue)\nFROM sales\nGROUP BY ROLLUP(region, country, category)",
+        "detection_sql": "SELECT COUNT(*) FROM (\n  SELECT COUNT(DISTINCT GROUPING SETS ((region, country, category), (region, country), (region), ()))\n) FROM sales"
+      },
+      {
+        "mistake": "Overlapping GROUPING SETS causing duplicate aggregation",
+        "what_goes_wrong": "If two sets are identical (e.g., GROUPING SETS ((region), (region))), the same subtotal is computed twice and summed — doubling the revenue.",
+        "symptom": "Subtotal values are exactly 2×, 3×, etc., of expected values.",
+        "bad_sql": "SELECT region, SUM(revenue) FROM sales GROUP BY GROUPING SETS ((region), (region), ())",
+        "good_sql": "SELECT region, SUM(revenue) FROM sales GROUP BY GROUPING SETS ((region), ())",
+        "detection_sql": "SELECT region, COUNT(*) AS num_sets\nFROM (\n  SELECT region, GROUPING SETS ((region), (region), ())\n  FROM sales\n) GROUP BY region\nHAVING COUNT(*) > 1"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "GROUPING SETS syntax per dialect",
+        "duckdb_behavior": "DuckDB supports GROUPING SETS and GROUPING() as expected. ORDER BY GROUPING() works.",
+        "postgres_behavior": "Postgres supports GROUPING SETS. GROUPING() returns 1 for rolled-up, 0 for kept.",
+        "bigquery_behavior": "BigQuery supports GROUPING SETS and GROUPING(). Also supports GROUPING_ID().",
+        "safe_alternative": "GROUPING SETS syntax is portable. Use GROUPING() to identify subtotal levels for clarity."
+      },
+      {
+        "construct": "ORDER BY GROUPING() with mixed NULLs",
+        "duckdb_behavior": "ORDER BY GROUPING(region), region NULLS LAST sorts detail rows (G=0) first, then subtotals (G=1), with NULLs last.",
+        "postgres_behavior": "Same behavior.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Always order by GROUPING() first, then columns: ORDER BY GROUPING(region), region NULLS LAST, GROUPING(country), country NULLS LAST to group by subtotal level."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants *specific, non-hierarchical* subtotal combinations",
+        "user needs to skip levels (e.g., region+country, but not country alone)",
+        "user’s question includes 'subtotal by region only', 'region+country, plus grand total'",
+        "flexibility matters more than readability (e.g., dynamic subtotal rules)"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants *hierarchical* subtotals (region → country → total)",
+          "use_instead": "agg_group_rollup",
+          "why": "ROLLUP is shorter, clearer, and less error-prone for hierarchical paths"
+        },
+        {
+          "condition": "user wants *all* combinations (e.g., for OLAP)",
+          "use_instead": "agg_group_cube",
+          "why": "CUBE generates all combinations automatically without manual listing"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "custom subtotal", "specific subtotals", "manual subtotal",
+        "exactly these levels", "region+country, but not country alone"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "No rows in base table",
+        "what_happens": "GROUPING SETS returns one row per set: e.g., GROUPING SETS ((region), ()) returns two rows — one with region NULL (subtotal), one with region NULL (grand total).",
+        "handling": "No issue — both subtotals are valid. Use GROUPING() to distinguish them if needed."
+      },
+      {
+        "scenario": "All GROUPING SETS are identical",
+        "what_happens": "Duplicate sets are summed, doubling results. GROUPING SETS ((region), (region), ()) produces 2× revenue.",
+        "handling": "Remove duplicates manually or use DISTINCT inside GROUPING SETS (if supported) or pre-aggregate."
+      },
+      {
+        "scenario": "Empty GROUPING SETS list",
+        "what_happens": "Syntax error — at least one set is required.",
+        "handling": "Ensure at least one set: GROUPING SETS (())."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n × s) — where n = base rows, s = number of subtotal sets. Each set is aggregated separately, then UNIONed.",
+      "when_slow": "Many subtotal sets (e.g., >100) with large base tables — each set requires a full scan or sort.",
+      "optimization hint": "Pre-aggregate to low-cardinality dimensions in a CTE, then apply GROUPING SETS over aggregates. Or use GROUPING SETS only for high-value combinations."
+    }
+  },
+  {
+    "id": "agg_conditional",
+    "title": "Conditional Aggregation with FILTER Clause",
+    "intent_tags": [
+      "conditional sum", "filtered aggregation", "sum if", "sum where",
+      "conditional count", "pivoted aggregation", "pivot without pivot",
+      "sum filtered", "aggregation filter", "sum if condition",
+      "case in aggregate", "sum with condition", "conditional total"
+    ],
+    "sql_features": ["aggregation", "filter_clause", "conditional_aggregation", "case_when"],
+    "difficulty": "beginner",
+    "pattern_type": "aggregation",
+    "when_to_use": [
+      "user wants to compute multiple aggregations with different filters in one query (e.g., SUM(revenue) WHERE status = 'shipped', SUM(revenue) WHERE status = 'returned')",
+      "building pivot-style reports without PIVOT syntax (e.g., revenue by product type as separate columns)",
+      "user’s question includes 'sum shipped only', 'count active users', 'revenue by region'",
+      "generating multiple metrics with shared dimensions (e.g., region revenue, region shipping costs, region returns)"
+    ],
+    "when_not_to_use": [
+      "user wants to *filter rows* before aggregation — use WHERE instead (more efficient and clearer)",
+      "the filter logic is complex and shared by many aggregations — use CASE WHEN inside SUM for flexibility",
+      "user needs to group by the filter condition — use GROUP BY on the condition column instead",
+      "the aggregation is dynamic (unknown filters at query time) — use dynamic SQL or pre-computed filters"
+    ],
+    "related_patterns": [
+      "agg_pivot", "agg_conditional", "agg_having_vs_where",
+      "seg_case_when", "seg_case_when_classification"
+    ],
+    "concept_explanation": {
+      "what_it_does": "SUM(revenue) FILTER (WHERE status = 'shipped') computes the sum of revenue only for rows where status = 'shipped'. This lets you include multiple conditional aggregates in one SELECT without writing separate subqueries or CASE WHEN wrappers.",
+      "mental_model": "Imagine having multiple histograms on the same axis: one for shipped orders, one for returned orders, etc. FILTER lets you draw each histogram in a single pass of the data, instead of scanning the table multiple times.",
+      "key_behavior": "FILTER is evaluated *before* aggregation — it filters rows into the aggregate. It’s more efficient than CASE WHEN inside SUM because the database can skip rows early. FILTER doesn’t affect GROUP BY — groups are formed first, then filtered."
+    },
+    "template": {
+      "minimal": "-- Revenue by status as separate columns\nSELECT\n  region,\n  SUM(revenue) FILTER (WHERE status = 'shipped') AS shipped_rev,\n  SUM(revenue) FILTER (WHERE status = 'returned') AS returned_rev,\n  SUM(revenue) AS total_rev\nFROM sales\nGROUP BY region",
+      "realistic": "-- Revenue, cost, and margin by order status and region\n-- Grain: one row per region\nSELECT\n  c.region,\n  COUNT(*) FILTER (WHERE o.status = 'shipped') AS shipped_orders,\n  SUM(oi.quantity * oi.unit_price) FILTER (WHERE o.status = 'shipped') AS shipped_rev,\n  SUM(oi.quantity * oi.unit_cost) FILTER (WHERE o.status = 'shipped') AS shipped_cost,\n  SUM(oi.quantity * oi.unit_price) FILTER (WHERE o.status = 'returned') AS returned_rev,\n  COUNT(DISTINCT oi.order_id) FILTER (WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days') AS last_30d_orders,\n  COUNT(*) FILTER (WHERE o.status IS NULL) AS unknown_status_orders\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id\nJOIN customers c ON o.customer_id = c.customer_id\nWHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days'\nGROUP BY c.region\nORDER BY shipped_rev DESC",
+      "composable": "-- Compute revenue by region and status, then classify regions as 'high-shipped' or 'high-returned'\n-- Composes: agg_conditional + seg_case_when_classification\nWITH regional_metrics AS (\n  SELECT\n    c.region,\n    SUM(oi.quantity * oi.unit_price) FILTER (WHERE o.status = 'shipped') AS shipped_rev,\n    SUM(oi.quantity * oi.unit_price) FILTER (WHERE o.status = 'returned') AS returned_rev,\n    SUM(oi.quantity * oi.unit_price) AS total_rev\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY c.region\n)\nSELECT\n  region,\n  shipped_rev,\n  returned_rev,\n  total_rev,\n  CASE\n    WHEN shipped_rev > 0 AND returned_rev / NULLIF(shipped_rev, 0) > 0.2 THEN 'high_return_rate'\n    WHEN shipped_rev > 100000 THEN 'high_shipped'\n    ELSE 'normal'\n  END AS region_category\nFROM regional_metrics"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using FILTER *instead* of WHERE to filter rows",
+        "what_goes_wrong": "FILTER filters rows *within* an aggregate, but GROUP BY and other clauses are evaluated first. If you want to filter out rows entirely, WHERE is more efficient and clearer. Using FILTER when WHERE would do adds unnecessary computation.",
+        "symptom": "The query returns rows where status = 'returned', but the aggregation only counts 'shipped' — user expects no 'returned' rows in output.",
+        "bad_sql": "SELECT region, SUM(revenue) FILTER (WHERE status = 'shipped') FROM sales WHERE status = 'shipped'\nGROUP BY region",
+        "good_sql": "SELECT region, SUM(revenue) FROM sales WHERE status = 'shipped' GROUP BY region",
+        "detection_sql": "SELECT region, COUNT(*) FROM sales WHERE status = 'shipped' GROUP BY region\nEXCEPT\nSELECT region, COUNT(*) FROM (\n  SELECT region, revenue, status FROM sales\n  GROUP BY region, status\n) WHERE status = 'shipped' GROUP BY region"
+      },
+      {
+        "mistake": "Confusing FILTER (WHERE) with CASE WHEN inside SUM",
+        "what_goes_wrong": "FILTER filters rows *before* aggregation; CASE WHEN inside SUM includes all rows but returns 0 for non-matching ones. FILTER skips rows entirely, saving work. CASE WHEN is better when the condition is the *grouping key* (e.g., SUM(CASE WHEN status = 'shipped' THEN revenue ELSE 0 END) with GROUP BY status).",
+        "symptom": "Using FILTER when grouping by the condition leads to separate rows instead of one row with conditional columns.",
+        "bad_sql": "SELECT SUM(revenue) FILTER (WHERE status = 'shipped') FROM sales GROUP BY status",
+        "good_sql": "-- For grouping by status:\nSELECT status, SUM(revenue) FROM sales GROUP BY status\n-- For pivot-style columns, use FILTER outside GROUP BY:\nSELECT\n  SUM(revenue) FILTER (WHERE status = 'shipped') AS shipped,\n  SUM(revenue) FILTER (WHERE status = 'returned') AS returned\nFROM sales",
+        "detection_sql": "SELECT status, COUNT(*), SUM(revenue) FROM sales GROUP BY status\n-- vs pivot-style\nSELECT\n  SUM(revenue) FILTER (WHERE status = 'shipped') AS shipped,\n  SUM(revenue) FILTER (WHERE status = 'returned') AS returned\nFROM sales"
+      },
+      {
+        "mistake": "Using FILTER with GROUP BY without realizing it doesn’t affect grouping",
+        "what_goes_wrong": "FILTER only affects the aggregate — it doesn’t change which rows go into which group. If you want to group by a condition, you must use GROUP BY on the condition column.",
+        "symptom": "Region groups are correct, but the 'shipped' and 'returned' columns both show 0 for some regions — user expected filtering to create separate groups.",
+        "bad_sql": "SELECT region, SUM(revenue) FILTER (WHERE status = 'shipped') FROM sales GROUP BY region",
+        "good_sql": "SELECT region, SUM(revenue) FROM sales WHERE status = 'shipped' GROUP BY region\nUNION ALL\nSELECT region, SUM(revenue) FROM sales WHERE status = 'returned' GROUP BY region",
+        "detection_sql": "SELECT region, status, SUM(revenue) FROM sales GROUP BY region, status"
+      },
+      {
+        "mistake": "Filtering on an aggregated column (e.g., FILTER WHERE SUM(revenue) > 100)",
+        "what_goes_wrong": "FILTER is evaluated *before* aggregation — it can only filter on non-aggregated columns. Trying to filter on an aggregate (like SUM) is a syntax error or produces incorrect results.",
+        "symptom": "Query fails with 'aggregate function not allowed in FILTER', or results are nonsensical.",
+        "bad_sql": "SELECT region, SUM(revenue) FILTER (WHERE SUM(revenue) > 100) FROM sales GROUP BY region",
+        "good_sql": "SELECT region, SUM(revenue) AS rev\nFROM sales\nGROUP BY region\nHAVING SUM(revenue) > 100",
+        "detection_sql": "SELECT region, SUM(revenue) AS rev\nFROM sales\nGROUP BY region\nHAVING SUM(revenue) > 100"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "FILTER support per dialect",
+        "duckdb_behavior": "DuckDB fully supports FILTER (WHERE ...) for all aggregate functions (SUM, COUNT, etc.). It’s the preferred method for conditional aggregation.",
+        "postgres_behavior": "Postgres supports FILTER (WHERE ...) for aggregates. It’s standard SQL and works identically to DuckDB.",
+        "bigquery_behavior": "BigQuery supports FILTER (WHERE ...) for most aggregates, but some older versions may not support it for all functions.",
+        "safe_alternative": "FILTER is portable to DuckDB and Postgres. For legacy systems, use SUM(CASE WHEN ...) as a fallback — it’s less efficient but universally supported."
+      },
+      {
+        "construct": "FILTER with NULLs in the filter column",
+        "duckdb_behavior": "FILTER (WHERE status = 'shipped') treats NULL status as non-matching — rows with NULL status are excluded from that aggregate, but included in others (e.g., COUNT(*) FILTER (WHERE status IS NULL)).",
+        "postgres_behavior": "Same behavior — NULLs don’t match equality comparisons.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Explicitly handle NULLs: FILTER (WHERE status = 'shipped' OR status IS NULL) if NULLs should be included. Or normalize NULLs to a sentinel (e.g., 'unknown') before filtering."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants *multiple* conditional aggregations as *separate columns* in one row",
+        "the filter condition is *independent* across aggregations (e.g., shipped, returned, pending)",
+        "user’s question includes 'sum shipped only', 'count active users', 'revenue by region'",
+        "performance matters — FILTER avoids CASE WHEN and is more efficient"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to group by the filter condition itself (e.g., revenue per status)",
+          "use_instead": "agg_group_group_by",
+          "why": "GROUP BY on the status column creates separate rows per status, not columns"
+        },
+        {
+          "condition": "the filter condition is complex and shared by many aggregations",
+          "use_instead": "CASE WHEN inside SUM",
+          "why": "CASE WHEN allows multiple conditions per aggregation, while FILTER applies one condition per aggregate"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "sum shipped only", "count active", "filtered aggregation",
+        "conditional sum", "by region", "revenue by status"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "All rows filter out for a particular condition",
+        "what_happens": "FILTER returns NULL for that aggregate (e.g., SUM FILTER (WHERE false) = NULL).",
+        "handling": "Use COALESCE(SUM(...) FILTER (WHERE ...), 0) if zero is preferred. Or handle NULLs in the presentation layer."
+      },
+      {
+        "scenario": "FILTER column contains only NULLs",
+        "what_happens": "FILTER (WHERE column = 'value') excludes all rows (NULL ≠ 'value'), so the aggregate is NULL.",
+        "handling": "Filter NULLs explicitly: FILTER (WHERE column = 'value' OR column IS NULL) if NULLs are meaningful, or normalize NULLs first."
+      },
+      {
+        "scenario": "FILTER condition uses a non-deterministic function (e.g., RANDOM())",
+        "what_happens": "The filter may behave inconsistently if the function returns different values per row — DuckDB may evaluate it per-row, but behavior isn’t guaranteed.",
+        "handling": "Avoid non-deterministic functions in FILTER. Pre-compute flags or use CTEs to materialize random values."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) — FILTER filters rows per aggregate in a single pass. More efficient than multiple subqueries or CASE WHEN for many conditions.",
+      "when_slow": "Highly selective filters on large tables — but still faster than separate queries. Slower than WHERE for row-level filtering.",
+      "optimization hint": "Combine related filters: if counting shipped and returned, use COUNT(*) FILTER (WHERE status IN ('shipped', 'returned')) and count per status in the result. Pre-filter with WHERE where possible."
+    }
+  },
+  {
+    "id": "agg_having_vs_where",
+    "title": "HAVING vs WHERE Ordering",
+    "intent_tags": [
+      "filter aggregate", "HAVING", "WHERE on aggregate", "aggregate filter",
+      "post-aggregation filter", "group filter", "HAVING vs WHERE",
+      "WHERE vs HAVING", "filter after group", "after aggregation"
+    ],
+    "sql_features": ["having", "where", "aggregation", "group_by"],
+    "difficulty": "beginner",
+    "pattern_type": "correctness",
+    "when_to_use": [
+      "user wants to filter *after* aggregation (e.g., show only regions with >100 orders)",
+      "user’s question includes 'only show groups with', 'only regions over', 'filter group'",
+      "generating reports where the filter condition involves aggregate functions (SUM, COUNT, AVG)"
+    ],
+    "when_not_to_use": [
+      "user wants to filter *before* aggregation — use WHERE instead",
+      "the filter condition doesn’t involve aggregates — WHERE is more efficient and clearer",
+      "user wants to filter on a *non-aggregated* column — WHERE applies earlier and is correct"
+    ],
+    "related_patterns": [
+      "agg_conditional", "agg_group_rollup", "agg_group_cube",
+      "agg_group_grouping_sets", "agg_safe_division"
+    ],
+    "concept_explanation": {
+      "what_it_does": "WHERE filters *before* GROUP BY and aggregation; HAVING filters *after* GROUP BY and aggregation. WHERE operates on row-level columns; HAVING operates on aggregated results (e.g., SUM(revenue), COUNT(*)).",
+      "mental_model": "Imagine a pipeline: rows → WHERE (filter rows) → GROUP BY (form groups) → SUM/COUNT (aggregate) → HAVING (filter groups). WHERE happens first; HAVING happens last. You can’t use HAVING to filter rows before grouping."
+    },
+    "template": {
+      "minimal": "-- Filter groups with >10 orders\nSELECT region, COUNT(*) AS order_count\nFROM orders\nGROUP BY region\nHAVING COUNT(*) > 10\nORDER BY order_count DESC",
+      "realistic": "-- Revenue by region, but only show regions with >50 orders and >$10K revenue\n-- Grain: one row per qualifying region\nSELECT\n  c.region,\n  COUNT(*) AS order_count,\n  SUM(oi.quantity * oi.unit_price) AS revenue\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id\nJOIN customers c ON o.customer_id = c.customer_id\nWHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days'  -- row-level filter\nGROUP BY c.region\nHAVING COUNT(*) > 50 AND SUM(oi.quantity * oi.unit_price) > 10000\nORDER BY revenue DESC",
+      "composable": "-- Filter regions to top 5 by revenue, using QUALIFY (DuckDB) or CTE (portable)\n-- Composes: agg_having_vs_where + wf_row_number_dedup\nWITH regional_metrics AS (\n  SELECT\n    c.region,\n    COUNT(*) AS order_count,\n    SUM(oi.quantity * oi.unit_price) AS revenue\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\n  GROUP BY c.region\n  HAVING COUNT(*) > 10\n),\nranked AS (\n  SELECT *, ROW_NUMBER() OVER (ORDER BY revenue DESC) AS rn\n  FROM regional_metrics\n)\nSELECT region, order_count, revenue\nFROM ranked\nWHERE rn <= 5",
+      "composable_duckdb": "-- DuckDB QUALIFY version (no CTE needed)\nSELECT\n  c.region,\n  COUNT(*) AS order_count,\n  SUM(oi.quantity * oi.unit_price) AS revenue\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id\nJOIN customers c ON o.customer_id = c.customer_id\nWHERE o.order_date >= CURRENT_DATE - INTERVAL '60 days'\nGROUP BY c.region\nHAVING COUNT(*) > 10\nQUALIFY ROW_NUMBER() OVER (ORDER BY revenue DESC) <= 5"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using HAVING to filter non-aggregated columns",
+        "what_goes_wrong": "HAVING is evaluated *after* GROUP BY, so it can’t access non-aggregated columns in the SELECT clause. DuckDB (and most engines) will error: 'column must appear in GROUP BY or be aggregated'.",
+        "symptom": "Query fails with 'column ... is not valid in HAVING' or 'must appear in GROUP BY'.",
+        "bad_sql": "SELECT region, COUNT(*) FROM orders GROUP BY region HAVING status = 'shipped'",
+        "good_sql": "SELECT region, COUNT(*)\nFROM orders\nWHERE status = 'shipped'\nGROUP BY region",
+        "detection_sql": "SELECT * FROM (\n  SELECT region, COUNT(*)\n  FROM orders\n  GROUP BY region\n  HAVING status = 'shipped'\n) LIMIT 1"
+      },
+      {
+        "mistake": "Using WHERE with aggregated columns (e.g., WHERE COUNT(*) > 10)",
+        "what_goes_wrong": "WHERE is evaluated *before* aggregation, so COUNT(*) doesn’t exist yet. DuckDB will error: 'aggregate function not allowed in WHERE'.",
+        "symptom": "Query fails with 'aggregate function not allowed in WHERE clause'.",
+        "bad_sql": "SELECT region, COUNT(*) FROM orders WHERE COUNT(*) > 10 GROUP BY region",
+        "good_sql": "SELECT region, COUNT(*)\nFROM orders\nGROUP BY region\nHAVING COUNT(*) > 10",
+        "detection_sql": "SELECT * FROM (\n  SELECT region, COUNT(*)\n  FROM orders\n  WHERE COUNT(*) > 10\n  GROUP BY region\n) LIMIT 1"
+      },
+      {
+        "mistake": "Confusing HAVING with a post-SELECT filter",
+        "what_goes_wrong": "HAVING filters *groups*, not the *final SELECT*. If you want to filter on a calculated metric (e.g., revenue * 2 > 10000), you must reference the alias in a subquery or repeat the expression.",
+        "symptom": "HAVING revenue * 2 > 10000 fails with 'unknown column revenue' — aliases aren’t available in HAVING.",
+        "bad_sql": "SELECT region, SUM(revenue) AS rev\nFROM orders\nGROUP BY region\nHAVING rev * 2 > 10000",
+        "good_sql": "SELECT region, SUM(revenue) AS rev\nFROM orders\nGROUP BY region\nHAVING SUM(revenue) * 2 > 10000\n-- or\nSELECT * FROM (\n  SELECT region, SUM(revenue) AS rev\n  FROM orders\n  GROUP BY region\n) t\nWHERE rev * 2 > 10000",
+        "detection_sql": "SELECT * FROM (\n  SELECT region, SUM(revenue) AS rev\n  FROM orders\n  GROUP BY region\n  HAVING rev * 2 > 10000\n) LIMIT 1"
+      },
+      {
+        "mistake": "Using HAVING when WHERE would be more efficient",
+        "what_goes_wrong": "If the filter condition doesn’t involve aggregates, using HAVING means grouping all rows first, then filtering — inefficient. WHERE filters *before* grouping, reducing the dataset early.",
+        "symptom": "Query runs slower than expected — it processes all rows before filtering.",
+        "bad_sql": "SELECT region, COUNT(*) FROM orders GROUP BY region HAVING order_date >= CURRENT_DATE - INTERVAL '30 days'",
+        "good_sql": "SELECT region, COUNT(*)\nFROM orders\nWHERE order_date >= CURRENT_DATE - INTERVAL '30 days'\nGROUP BY region",
+        "detection_sql": "EXPLAIN SELECT region, COUNT(*) FROM orders GROUP BY region HAVING order_date >= CURRENT_DATE - INTERVAL '30 days'"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "HAVING with DuckDB aliases",
+        "duckdb_behavior": "DuckDB (like most engines) does *not* allow HAVING to reference SELECT aliases (e.g., HAVING rev > 1000). This is standard SQL behavior.",
+        "postgres_behavior": "Same — aliases are not visible in HAVING.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Repeat the aggregate expression in HAVING (e.g., HAVING SUM(revenue) > 1000) or wrap in a subquery to use the alias in WHERE."
+      },
+      {
+        "construct": "QUALIFY vs HAVING in DuckDB",
+        "duckdb_behavior": "DuckDB supports QUALIFY (e.g., QUALIFY ROW_NUMBER() > 1), which filters *after* window functions. HAVING filters *after* aggregation but *before* window functions.",
+        "postgres_behavior": "No QUALIFY — must use CTE + WHERE for window filtering.",
+        "bigquery_behavior": "QUALIFY is supported in BigQuery.",
+        "safe_alternative": "For window filtering, use CTE + WHERE in Postgres. For DuckDB, QUALIFY is cleaner. For HAVING, use it as designed: filter aggregates after GROUP BY."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user wants to filter *groups* based on an *aggregate* condition (e.g., SUM, COUNT, AVG)",
+        "user’s question includes 'only show groups with', 'only regions over', 'filter group'",
+        "the filter condition involves multiple rows aggregated (e.g., COUNT(*) > 10, not customer_id = 'x')"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to filter *rows* before aggregation",
+          "use_instead": "agg_where",
+          "why": "WHERE filters rows before GROUP BY — more efficient and clearer when aggregates aren’t involved"
+        },
+        {
+          "condition": "user wants to filter *after* aggregation but needs *calculated* metrics (e.g., rev * 2)",
+          "use_instead": "agg_subquery",
+          "why": "Wrap aggregation in a subquery to reference aliases in WHERE instead of HAVING"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "only groups with", "filter group", "HAVING", "post-aggregation",
+        "after aggregation", "group filter"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "HAVING with no GROUP BY",
+        "what_happens": "HAVING without GROUP BY applies to the *entire result set* as one group. HAVING COUNT(*) > 0 is always true for non-empty tables.",
+        "handling": "If no GROUP BY, HAVING is redundant with WHERE. Prefer WHERE for clarity."
+      },
+      {
+        "scenario": "HAVING filters out all groups",
+        "what_happens": "Result set is empty — no rows returned.",
+        "handling": "No issue — empty results are correct. But check GROUP BY keys to ensure filters aren’t too strict."
+      },
+      {
+        "scenario": "HAVING uses non-deterministic aggregates (e.g., RANDOM())",
+        "what_happens": "Behavior is undefined — aggregates may vary per execution. DuckDB may evaluate per-group, but results aren’t reproducible.",
+        "handling": "Avoid non-deterministic functions in HAVING. Use CTEs to materialize random values first."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "HAVING filters *after* aggregation — it processes all groups, which could be many. WHERE filters *before* grouping, reducing work early.",
+      "when_slow": "Large number of groups (e.g., 100k regions) with HAVING filters that eliminate few groups — all groups are computed, then filtered.",
+      "optimization hint": "Move row-level filters to WHERE to reduce group count. Only use HAVING for conditions that require aggregation (e.g., COUNT(*) > 10, not region = 'North')."
+    }
+  },
+  {
+    "id": "agg_approx_distinct",
+    "title": "Approximate COUNT DISTINCT (HyperLogLog)",
+    "intent_tags": [
+      "approx count distinct", "approximate unique", "HyperLogLog", "fast unique",
+      "estimate unique", "approx distinct", "approx distinct count",
+      "approx unique users", "approx unique products", "fast distinct"
+    ],
+    "sql_features": ["approx_count_distinct", "approximate_count_distinct"],
+    "difficulty": "intermediate",
+    "pattern_type": "aggregation",
+    "when_to_use": [
+      "user needs a fast count of distinct values in large columns (e.g., unique users, unique sessions) and exact counts aren’t required",
+      "query performance is critical and exact COUNT(DISTINCT) is too slow",
+      "user’s question includes 'roughly how many unique', 'estimate unique', 'approx distinct'",
+      "generating real-time dashboards where speed > precision (e.g., daily active users)"
+    ],
+    "when_not_to_use": [
+      "user needs *exact* counts (e.g., for billing, financial reports)",
+      "the column has low cardinality (<10k unique values) — exact COUNT(DISTINCT) is fast and memory-efficient",
+      "user wants to *compare* distinct counts across datasets — approximation error may mask real differences",
+      "the query involves joins where duplicates are expected — exact counts ensure correctness"
+    ],
+    "related_patterns": [
+      "agg_count", "agg_conditional", "agg_safe_division",
+      "stat_percentile_distribution", "agg_string_agg"
+    ],
+    "concept_explanation": {
+      "what_it_does": "APPROX_COUNT_DISTINCT(column) estimates the number of unique values using the HyperLogLog algorithm, which uses a small, fixed amount of memory (KB) regardless of data size, trading a small error margin (±1-2%) for massive speed gains.",
+      "mental_model": "Imagine counting marbles in a jar by sampling colors — you don’t count every marble, but use color distribution to estimate the total. HyperLogLog does something similar with hash bits, tracking patterns of rare hashes to estimate count.",
+      "key_behavior": "Accuracy is *relative*: for 1M unique values, error is ~1,000 (0.1%). For 100 unique values, error is ~1 (1%). It’s deterministic across executions with the same data, but different data orders may yield slightly different estimates."
+    },
+    "template": {
+      "minimal": "SELECT APPROX_COUNT_DISTINCT(user_id) AS unique_users FROM events",
+      "realistic": "-- Estimated unique users and events per day, for real-time dashboard\nWITH daily_events AS (\n  SELECT\n    DATE_TRUNC('day', event_time) AS event_date,\n    user_id,\n    event_type\n  FROM events\n  WHERE event_time >= CURRENT_DATE - INTERVAL '30 days'\n)\nSELECT\n  event_date,\n  APPROX_COUNT_DISTINCT(user_id) AS unique_users,\n  COUNT(*) AS total_events,\n  APPROX_COUNT_DISTINCT(event_type) AS unique_event_types\nFROM daily_events\nGROUP BY event_date\nORDER BY event_date DESC",
+      "composable": "-- Compare estimated unique users vs exact count for validation\n-- Composes: agg_approx_distinct + agg_count\nWITH estimates AS (\n  SELECT\n    DATE_TRUNC('day', event_time) AS event_date,\n    APPROX_COUNT_DISTINCT(user_id) AS approx_users\n  FROM events\n  WHERE event_time >= CURRENT_DATE - INTERVAL '7 days'\n  GROUP BY event_date\n),\nexact_counts AS (\n  SELECT\n    DATE_TRUNC('day', event_time) AS event_date,\n    COUNT(DISTINCT user_id) AS exact_users\n  FROM events\n  WHERE event_time >= CURRENT_DATE - INTERVAL '7 days'\n  GROUP BY event_date\n)\nSELECT\n  e.event_date,\n  e.exact_users,\n  approx.estapprox_users,\n  ROUND((e.exact_users - approx.estapprox_users) / NULLIF(e.exact_users, 0) * 100, 2) AS error_pct\nFROM exact_counts e\nJOIN estimates approx ON e.event_date = approx.event_date\nORDER BY e.event_date DESC",
+      "composable_duckdb": "-- Approximate unique users per region with error bounds\nWITH user_counts AS (\n  SELECT\n    c.region,\n    APPROX_COUNT_DISTINCT(e.user_id) AS approx_unique_users\n  FROM events e\n  JOIN customers c ON e.user_id = c.user_id\n  WHERE e.event_time >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY c.region\n)\nSELECT\n  region,\n  approx_unique_users,\n  -- HyperLogLog standard error ~1.04/sqrt(m) where m=4096, so ~0.5% error\n  ROUND(approx_unique_users * 0.01, 0) AS approx_error_margin,\n  ROUND(approx_unique_users * 0.99, 0) AS lower_bound,\n  ROUND(approx_unique_users * 1.01, 0) AS upper_bound\nFROM user_counts\nORDER BY approx_unique_users DESC"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Using APPROX_COUNT_DISTINCT for exact reporting",
+        "what_goes_wrong": "The approximation error (±1-2%) is acceptable for dashboards but unacceptable for billing or financial reports. If exact counts are needed, APPROX_COUNT_DISTINCT may cause legal/compliance issues.",
+        "symptom": "Financial reports show user counts that are 'close enough' but not precise — e.g., 9,950 vs 10,000 users — leading to reconciliation failures.",
+        "bad_sql": "SELECT APPROX_COUNT_DISTINCT(customer_id) AS customers FROM orders WHERE order_date = CURRENT_DATE - INTERVAL '1 day'",
+        "good_sql": "SELECT COUNT(DISTINCT customer_id) AS customers FROM orders WHERE order_date = CURRENT_DATE - INTERVAL '1 day'",
+        "detection_sql": "SELECT COUNT(DISTINCT customer_id), APPROX_COUNT_DISTINCT(customer_id)\nFROM orders WHERE order_date = CURRENT_DATE - INTERVAL '1 day'"
+      },
+      {
+        "mistake": "Confusing APPROX_COUNT_DISTINCT with COUNT(DISTINCT)",
+        "what_goes_wrong": "APPROX_COUNT_DISTINCT is *not* a drop-in replacement for COUNT(DISTINCT). It’s an estimate with a known error margin, while COUNT(DISTINCT) is exact. Mixing them in the same query may cause inconsistency.",
+        "symptom": "Two queries on the same table return different values: one exact, one approximate — confusing analysts.",
+        "bad_sql": "-- Inconsistent:\nSELECT\n  COUNT(DISTINCT user_id) AS exact_users,\n  APPROX_COUNT_DISTINCT(user_id) AS approx_users\nFROM events",
+        "good_sql": "-- For estimation: only use APPROX_COUNT_DISTINCT\n-- For exact: only use COUNT(DISTINCT)\nSELECT\n  APPROX_COUNT_DISTINCT(user_id) AS users\nFROM events",
+        "detection_sql": "SELECT COUNT(DISTINCT user_id), APPROX_COUNT_DISTINCT(user_id)\nFROM events\nWHERE event_time >= CURRENT_DATE - INTERVAL '1 day'"
+      },
+      {
+        "mistake": "Using APPROX_COUNT_DISTINCT on low-cardinality columns",
+        "what_goes_wrong": "For columns with <10k unique values, exact COUNT(DISTINCT) is fast and uses less memory than HyperLogLog’s overhead. Approximation adds unnecessary error for minimal speed gain.",
+        "symptom": "Query returns an estimate with ±100 error when exact is 1,200 — relative error is 8%, worse than exact count.",
+        "bad_sql": "SELECT APPROX_COUNT_DISTINCT(status) FROM orders",
+        "good_sql": "SELECT COUNT(DISTINCT status) FROM orders",
+        "detection_sql": "SELECT COUNT(DISTINCT status) AS exact, APPROX_COUNT_DISTINCT(status) AS approx FROM orders"
+      },
+      {
+        "mistake": "Comparing approximate counts across datasets without calibration",
+        "what_goes_wrong": "Approximate counts from different datasets may have non-identical error profiles, especially if data distribution differs. Comparing 9,950 vs 10,050 could mask a real 1,000 difference.",
+        "symptom": "Two datasets appear similar (9,950 vs 10,050), but exact counts show 10,000 vs 12,000 — a 20% difference masked by approximation.",
+        "bad_sql": "SELECT APPROX_COUNT_DISTINCT(user_id) FROM events WHERE region = 'North'\nSELECT APPROX_COUNT_DISTINCT(user_id) FROM events WHERE region = 'South'",
+        "good_sql": "-- For comparison, use exact counts or calibrate error margins:\nSELECT\n  region,\n  COUNT(DISTINCT user_id) AS exact_users\nFROM events\nWHERE region IN ('North', 'South')\nGROUP BY region",
+        "detection_sql": "SELECT COUNT(DISTINCT user_id) AS exact, APPROX_COUNT_DISTINCT(user_id) AS approx\nFROM events\nWHERE region IN ('North', 'South')\nGROUP BY region"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "APPROX_COUNT_DISTINCT syntax per dialect",
+        "duckdb_behavior": "DuckDB supports APPROX_COUNT_DISTINCT as a built-in function, using HyperLogLog++ with 4096 registers. Accuracy: ±1.2% at 95% confidence.",
+        "postgres_behavior": "Postgres doesn’t have native APPROX_COUNT_DISTINCT. Use the `pg_hyperloglog` extension or approximate with COUNT(DISTINCT) on sampled data.",
+        "bigquery_behavior": "BigQuery supports APPROX_COUNT_DISTINCT (HyperLogLog++) with a configurable precision parameter.",
+        "safe_alternative": "If targeting Postgres, use pg_hyperloglog extension or pre-aggregate in DuckDB. For portability, use COUNT(DISTINCT) for low-cardinality columns and APPROX in high-cardinality only when speed > precision."
+      },
+      {
+        "construct": "APPROX_COUNT_DISTINCT with NULLs",
+        "duckdb_behavior": "APPROX_COUNT_DISTINCT *ignores* NULLs — same as COUNT(DISTINCT). NULL is not counted as a distinct value.",
+        "postgres_behavior": "Same — NULLs are ignored in distinct counts.",
+        "bigquery_behavior": "Same.",
+        "safe_alternative": "Normalize NULLs before counting if NULLs should be treated as a distinct category (e.g., COALESCE(column, 'UNKNOWN'))."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user needs fast, *estimated* unique counts for large datasets (>1M rows)",
+        "user’s question includes 'roughly how many unique', 'approx distinct', 'estimate'",
+        "real-time dashboards or exploratory analysis where speed > 0.1% precision",
+        "low-memory environment where exact COUNT(DISTINCT) would OOM"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user needs *exact* counts for financial/billing/reporting",
+          "use_instead": "agg_count_exact",
+          "why": "COUNT(DISTINCT) is exact and required for compliance"
+        },
+        {
+          "condition": "column has low cardinality (<10k distinct values)",
+          "use_instead": "agg_count_exact",
+          "why": "Exact COUNT(DISTINCT) is fast and accurate for low-cardinality columns"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "approximate", "estimate", "roughly", "fast unique",
+        "approx distinct", " HyperLogLog"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "All values are NULL",
+        "what_happens": "APPROX_COUNT_DISTINCT returns 0 — same as COUNT(DISTINCT).",
+        "handling": "No issue — 0 is correct. But verify with COUNT(DISTINCT) if NULLs should be counted as a category."
+      },
+      {
+        "scenario": "Single value repeated",
+        "what_happens": "APPROX_COUNT_DISTINCT returns ~1 (± error margin) — e.g., 0.99, 1.01.",
+        "handling": "No issue — estimates are close to 1. Use COALESCE(ROUND(APPROX...), 1) for reporting."
+      },
+      {
+        "scenario": "Very high cardinality (>100M distinct)",
+        "what_happens": "APPROX_COUNT_DISTINCT uses constant memory — scalability is excellent. Accuracy remains ±1-2%.",
+        "handling": "No change needed — it’s designed for this case. Exact COUNT(DISTINCT) would likely OOM."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) with constant memory — scales to billions of rows with KB of memory.",
+      "when_slow": "None — it’s extremely fast. The bottleneck is usually I/O, not computation.",
+      "optimization hint": "For ultra-large tables, pre-filter with WHERE to reduce row count before APPROX_COUNT_DISTINCT. But unlike COUNT(DISTINCT), it doesn’t need sorting or hashing — speed is already optimal."
+    }
+  },
+  {
+    "id": "agg_string_agg",
+    "title": "STRING_AGG / LIST_AGG for Concatenated Output",
+    "intent_tags": [
+      "concatenate", "string aggregate", "listagg", "string concat", "comma separated",
+      "listagg", "group concat", "aggregate list", "string aggregation",
+      "list of values", "comma separated list", "join strings"
+    ],
+    "sql_features": ["string_agg", "string_agg", "list_agg"],
+    "difficulty": "beginner",
+    "pattern_type": "utility",
+    "when_to_use": [
+      "user wants to concatenate values from multiple rows into one string per group (e.g., 'product1, product2, product3' per customer)",
+      "generating summary reports where list of items is needed (e.g., 'orders: 1001, 1002, 1003')",
+      "user’s question includes 'list all', 'comma separated', 'concatenate values'",
+      "preparing data for export or integration where concatenated strings are required"
+    ],
+    "when_not_to_use": [
+      "user wants to *count* distinct values — use COUNT(DISTINCT) or APPROX_COUNT_DISTINCT",
+      "the concatenated string is used for grouping or analysis — consider normalization instead",
+      "performance is critical and strings are very long — STRING_AGG can be memory-intensive",
+      "user wants to *join* tables — use actual JOINs, not STRING_AGG for relational operations"
+    ],
+    "related_patterns": [
+      "agg_array_agg", "agg_count", "agg_conditional",
+      "agg_safe_division", "agg_pivot"
+    ],
+    "concept_explanation": {
+      "what_it_does": "STRING_AGG(column, ', ') concatenates all values in the group into a single string, separated by the delimiter. It supports ORDER BY within the aggregate (e.g., STRING_AGG(column, ', ' ORDER BY date) for deterministic ordering).",
+      "mental_model": "Imagine gluing paper strips with names onto a poster — each row is a strip, and you glue them in order (or any order) with a comma and space between them. The result is one long string per group."
+    },
+    "template": {
+      "minimal": "-- Order IDs per customer as comma-separated list\nSELECT\n  customer_id,\n  STRING_AGG(order_id::TEXT, ', ' ORDER BY order_date) AS order_ids\nFROM orders\nGROUP BY customer_id",
+      "realistic": "-- Customer order summary: first name, last order date, and comma-separated order IDs\nWITH customer_orders AS (\n  SELECT\n    c.customer_id,\n    c.first_name,\n    c.last_name,\n    o.order_id,\n    o.order_date,\n    SUM(oi.quantity * oi.unit_price) AS order_total\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '90 days'\n  GROUP BY c.customer_id, c.first_name, c.last_name, o.order_id, o.order_date\n)\nSELECT\n  customer_id,\n  first_name,\n  last_name,\n  MAX(order_date) AS last_order_date,\n  COUNT(*) AS order_count,\n  STRING_AGG(order_id::TEXT, ', ' ORDER BY order_date) AS order_ids\nFROM customer_orders\nGROUP BY customer_id, first_name, last_name\nORDER BY last_order_date DESC",
+      "composable": "-- Concatenate product categories per region, then classify regions\n-- Composes: agg_string_agg + seg_case_when_classification\nWITH region_products AS (\n  SELECT\n    c.region,\n    p.category,\n    COUNT(*) AS product_count\n  FROM order_items oi\n  JOIN orders o ON oi.order_id = o.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  JOIN customers c ON o.customer_id = c.customer_id\n  WHERE o.order_date >= CURRENT_DATE - INTERVAL '30 days'\n  GROUP BY c.region, p.category\n),\nregion_lists AS (\n  SELECT\n    region,\n    STRING_AGG(category, ', ' ORDER BY product_count DESC) AS categories\n  FROM region_products\n  GROUP BY region\n)\nSELECT\n  region,\n  categories,\n  CASE\n    WHEN categories LIKE '%Electronics%' THEN 'tech_region'\n    WHEN categories LIKE '%Books%' THEN 'edu_region'\n    ELSE 'mixed_region'\n  END AS region_type\nFROM region_lists"
+    },
+    "mistake_patterns": [
+      {
+        "mistake": "Forgetting ORDER BY in STRING_AGG",
+        "what_goes_wrong": "Without ORDER BY, the concatenation order is non-deterministic — rows may appear in different orders across executions, causing inconsistent output strings.",
+        "symptom": "Query returns 'A, B, C' one time and 'C, A, B' another time on the same data.",
+        "bad_sql": "SELECT customer_id, STRING_AGG(order_id::TEXT, ', ') FROM orders GROUP BY customer_id",
+        "good_sql": "SELECT customer_id, STRING_AGG(order_id::TEXT, ', ' ORDER BY order_date) FROM orders GROUP BY customer_id",
+        "detection_sql": "SELECT customer_id, STRING_AGG(order_id::TEXT, ', ' ORDER BY order_id) AS list1,\n       STRING_AGG(order_id::TEXT, ', ' ORDER BY order_id) AS list2\nFROM orders GROUP BY customer_id\nHAVING list1 <> list2"
+      },
+      {
+        "mistake": "Using STRING_AGG for grouping or analysis",
+        "what_goes_wrong": "Concatenated strings are for display/export, not for analysis. Trying to parse strings in downstream processes (e.g., 'contains Electronics') is fragile and inefficient.",
+        "symptom": "Reports use STRING_AGG to generate 'categories', then filter with LIKE '%Electronics%' — error-prone and slow on large data.",
+        "bad_sql": "SELECT * FROM (\n  SELECT customer_id, STRING_AGG(category, ', ') AS categories\n  FROM orders JOIN products USING (product_id)\n  GROUP BY customer_id\n) WHERE categories LIKE '%Electronics%'",
+        "good_sql": "-- Better: group by category directly, then aggregate *after* filtering\nSELECT customer_id, STRING_AGG(category, ', ' ORDER BY category)\nFROM (\n  SELECT customer_id, category\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  WHERE p.category = 'Electronics'\n) t\nGROUP BY customer_id",
+        "detection_sql": "EXPLAIN SELECT * FROM (\n  SELECT customer_id, STRING_AGG(category, ', ') AS categories\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN products p ON oi.product_id = p.product_id\n  GROUP BY customer_id\n) WHERE categories LIKE '%Electronics%'"
+      },
+      {
+        "mistake": "STRING_AGG on very long strings causing memory overflow",
+        "what_goes_wrong": "STRING_AGG builds the entire string in memory. For groups with thousands of items, the string may exceed memory limits, causing OOM or slowdowns.",
+        "symptom": "Query fails with 'out of memory' or 'string too long' error.",
+        "bad_sql": "SELECT customer_id, STRING_AGG(product_name, ', ' ORDER BY product_name) FROM orders JOIN order_items ON ... GROUP BY customer_id",
+        "good_sql": "SELECT customer_id, SUBSTRING(STRING_AGG(...), 1, 1000) AS limited_list FROM ... GROUP BY customer_id\n-- or\nSELECT customer_id, STRING_AGG(SUBSTRING(product_name, 1, 50), ', ') FROM ... GROUP BY customer_id",
+        "detection_sql": "SELECT customer_id, COUNT(*) AS item_count\nFROM (\n  SELECT customer_id, product_name\n  FROM orders o\n  JOIN order_items oi ON o.order_id = oi.order_id\n  JOIN products p ON oi.product_id = p.product_id\n) GROUP BY customer_id\nORDER BY item_count DESC\nLIMIT 1"
+      },
+      {
+        "mistake": "NULL values included in STRING_AGG output",
+        "what_goes_wrong": "By default, STRING_AGG *ignores* NULL values — same as other aggregates. If NULLs should be replaced with a placeholder, they’re silently omitted.",
+        "symptom": "User expects 'A, B, NULL' but gets 'A, B' — missing NULLs.",
+        "bad_sql": "SELECT customer_id, STRING_AGG(product_name, ', ' ORDER BY product_name) FROM orders JOIN products USING (product_id) GROUP BY customer_id",
+        "good_sql": "SELECT customer_id, STRING_AGG(COALESCE(product_name, 'Unknown'), ', ' ORDER BY product_name) FROM orders JOIN products USING (product_id) GROUP BY customer_id",
+        "detection_sql": "SELECT customer_id, COUNT(*)\nFROM orders o\nJOIN order_items oi ON o.order_id = oi.order_id\nJOIN products p ON oi.product_id = p.product_id\nWHERE p.product_name IS NULL\nGROUP BY customer_id"
+      }
+    ],
+    "dialect_traps": [
+      {
+        "construct": "STRING_AGG vs LISTAGG syntax",
+        "duckdb_behavior": "DuckDB supports both STRING_AGG and LIST_AGG as aliases. STRING_AGG(column, ', ' ORDER BY ...) is standard and preferred.",
+        "postgres_behavior": "Postgres supports STRING_AGG and LISTAGG (for compatibility). Both behave identically.",
+        "bigquery_behavior": "BigQuery uses STRING_AGG(column, ', ' ORDER BY ...) syntax — same as DuckDB.",
+        "safe_alternative": "Use STRING_AGG with ORDER BY for clarity. Avoid LISTAGG in cross-dialect code for portability."
+      },
+      {
+        "construct": "STRING_AGG with NULLs in the delimiter position",
+        "duckdb_behavior": "DuckDB’s STRING_AGG doesn’t accept NULL as delimiter — it throws an error. NULL must be handled before concatenation.",
+        "postgres_behavior": "Postgres allows NULL as delimiter, resulting in NULL output.",
+        "bigquery_behavior": "BigQuery allows NULL as delimiter, resulting in NULL output.",
+        "safe_alternative": "Use COALESCE for the delimiter: STRING_AGG(col, COALESCE(delimiter, ',')) or pre-filter NULLs."
+      }
+    ],
+    "decision_logic": {
+      "choose_this_when": [
+        "user needs to *display* or *export* a list of values as a single string per group",
+        "user’s question includes 'comma separated', 'list of', 'concatenate values'",
+        "the concatenated string is for *read-only* purposes (display, export, integration)",
+        "ordering matters — user wants 'oldest first' or 'highest value first'"
+      ],
+      "choose_alternative_when": [
+        {
+          "condition": "user wants to *analyze* or *group by* the concatenated value",
+          "use_instead": "agg_conditional",
+          "why": "Use COUNT/DISTINCT or CASE WHEN to analyze categories, then aggregate *after*"
+        },
+        {
+          "condition": "user wants to *join* tables or do relational operations",
+          "use_instead": "join_inner",
+          "why": "STRING_AGG is for display, not relational joins"
+        }
+      ],
+      "decision_phrase_triggers": [
+        "comma separated", "list all", "concatenate", "join strings",
+        "list of values", "aggregate list"
+      ]
+    },
+    "edge_cases": [
+      {
+        "scenario": "Empty group (no rows after GROUP BY)",
+        "what_happens": "STRING_AGG returns NULL for that group — same as other aggregates (e.g., SUM returns 0, but STRING_AGG has no identity string).",
+        "handling": "Use COALESCE(STRING_AGG(...), '') to return an empty string instead of NULL."
+      },
+      {
+        "scenario": "All values in group are NULL",
+        "what_happens": "STRING_AGG ignores NULLs, so the result is NULL (empty string of NULLs).",
+        "handling": "Replace NULLs first: COALESCE(col, 'Unknown')."
+      },
+      {
+        "scenario": "Delimiter contains special characters (e.g., comma in data)",
+        "what_happens": "If a value contains the delimiter (e.g., 'A, B'), it appears as two items in the output string.",
+        "handling": "Use a rare delimiter (e.g., ' | ') or wrap values in quotes: STRING_AGG('\"' || col || '\"', ', ') ORDER BY col."
+      }
+    ],
+    "performance_notes": {
+      "complexity": "O(n) per group — concatenation is linear in the number of items. Memory usage = total string length per group.",
+      "when_slow": "Groups with very long strings (e.g., 10k+ items, each >100 chars) — memory can exceed 1GB per group.",
+      "optimization hint": "Pre-filter rows to relevant items before STRING_AGG. Limit string length with SUBSTRING if display only needs top N items. Avoid STRING_AGG in high-cardinality groups."
+    }
+  }
+]

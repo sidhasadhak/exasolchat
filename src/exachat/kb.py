@@ -256,10 +256,12 @@ def build_embedding_fn(
 def _embed_text(chunk: dict) -> str:
     """Build the text to embed for a KB chunk.
 
-    Handles both the legacy flat format (strings/lists-of-strings) and the
-    enriched domain format where ``anti_patterns`` and other fields are
-    lists-of-dicts.  Also surfaces ``retrieval_metadata.synonyms`` and
-    ``retrieval_metadata.query_examples`` to improve semantic matching.
+    Handles three schema variants:
+    - Legacy flat format  — strings / lists-of-strings
+    - Enriched domain format — anti_patterns as list[dict], retrieval_metadata,
+      metric_nature, sql_assets, inflation/deflation causes, causal chains
+    - SQL pattern format  — concept_explanation, mistake_patterns, dialect_traps,
+      decision_logic, when_not_to_use, sql_features
     """
     parts = [chunk.get("title", "")]
 
@@ -269,13 +271,25 @@ def _embed_text(chunk: dict) -> str:
     elif isinstance(tags, str):
         parts.append(tags)
 
+    # sql_features (SQL JSON schema) — adds "window", "cte", "partition" etc.
+    sql_features = chunk.get("sql_features", [])
+    if isinstance(sql_features, list) and sql_features:
+        parts.append(" ".join(str(f) for f in sql_features))
+
     when = chunk.get("when_to_use", "")
     if isinstance(when, list):
         parts.append(" ".join(str(w) for w in when))
     elif isinstance(when, str):
         parts.append(when)
 
-    # anti_patterns: list[str] (legacy) or list[dict] (enriched)
+    # when_not_to_use (SQL JSON) — negative signal for disambiguation
+    when_not = chunk.get("when_not_to_use", [])
+    if isinstance(when_not, list) and when_not:
+        parts.append(" ".join(str(w) for w in when_not))
+    elif isinstance(when_not, str) and when_not:
+        parts.append(when_not)
+
+    # anti_patterns: list[str] (legacy) or list[dict] (enriched domain)
     anti = chunk.get("anti_patterns", [])
     if isinstance(anti, list):
         anti_parts = []
@@ -294,7 +308,31 @@ def _embed_text(chunk: dict) -> str:
     elif isinstance(anti, str):
         parts.append(anti)
 
-    # retrieval_metadata: synonyms + query_examples widen the recall surface
+    # concept_explanation (SQL JSON) — what_it_does anchors semantic meaning
+    concept = chunk.get("concept_explanation", {})
+    if isinstance(concept, dict):
+        what_it_does = concept.get("what_it_does", "")
+        if what_it_does:
+            parts.append(what_it_does)
+
+    # mistake_patterns (SQL JSON) — mistake labels expand retrieval surface
+    mistakes = chunk.get("mistake_patterns", [])
+    if isinstance(mistakes, list):
+        mistake_parts = [m.get("mistake", "") for m in mistakes if isinstance(m, dict) and m.get("mistake")]
+        if mistake_parts:
+            parts.append(" ".join(mistake_parts))
+
+    # decision_logic (SQL JSON) — choose_this_when + decision_phrase_triggers
+    dl = chunk.get("decision_logic", {})
+    if isinstance(dl, dict):
+        choose_when = dl.get("choose_this_when", [])
+        if isinstance(choose_when, list) and choose_when:
+            parts.append(" ".join(str(c) for c in choose_when))
+        triggers = dl.get("decision_phrase_triggers", [])
+        if isinstance(triggers, list) and triggers:
+            parts.append(" ".join(str(t) for t in triggers))
+
+    # retrieval_metadata (domain): synonyms + query_examples widen recall
     rm = chunk.get("retrieval_metadata", {})
     if isinstance(rm, dict):
         synonyms = rm.get("synonyms", [])
@@ -315,7 +353,7 @@ class KnowledgeBase:
     def __init__(
         self,
         persist_dir: Optional[str] = None,
-        n_results: int = 3,
+        n_results: int = 5,
         ef: Optional["_BagOfWordsEF | _SemanticEF"] = None,
     ):
         self._n_results = n_results
@@ -388,18 +426,26 @@ class KnowledgeBase:
         return self._upsert(chunks)
 
     def _upsert(self, chunks: list[dict]) -> int:
-        ids, documents, metadatas = [], [], []
+        # Deduplicate by ID within the batch: when two chunks share an ID,
+        # keep the one with more keys (the enriched SQL-pattern schema always
+        # beats the legacy flat schema, so the richer pattern wins).
+        id_to_chunk: dict[str, dict] = {}
         for chunk in chunks:
+            cid = str(chunk.get("id") or hashlib.sha256(
+                json.dumps(chunk, sort_keys=True).encode()
+            ).hexdigest()[:16])
+            if cid not in id_to_chunk or len(chunk) > len(id_to_chunk[cid]):
+                id_to_chunk[cid] = chunk
+
+        ids, documents, metadatas = [], [], []
+        for cid, chunk in id_to_chunk.items():
             try:
-                doc_id = str(chunk.get("id") or hashlib.sha256(
-                    json.dumps(chunk, sort_keys=True).encode()
-                ).hexdigest()[:16])
                 # Compute all three values BEFORE any append so a failure in
                 # _embed_text (e.g. unexpected types) cannot leave ids/documents/
                 # metadatas with unequal lengths.
                 doc_text = _embed_text(chunk)
                 chunk_json = json.dumps(chunk)
-                ids.append(doc_id)
+                ids.append(cid)
                 documents.append(doc_text)
                 metadatas.append({"chunk_json": chunk_json})
             except Exception as exc:
@@ -426,15 +472,19 @@ class KnowledgeBase:
     def format_for_prompt(self, patterns: list[dict], dialect: str = "") -> str:
         """Render retrieved patterns as a prompt snippet.
 
-        Handles both the legacy flat format and the enriched domain format
-        (anti_patterns as dicts, sql_assets, inflation/deflation causes,
-        causal_relationships, metric_nature, diagnostic_questions).
+        Handles three schema variants:
+        - Legacy flat format  — string template, string anti_patterns
+        - Enriched domain format — metric_nature dict, sql_assets, inflation/
+          deflation causes with detection SQL, causal_relationships
+        - SQL pattern format  — concept_explanation, template dict (minimal/
+          realistic/composable), mistake_patterns, dialect_traps, decision_logic,
+          edge_cases, performance_notes
         """
         parts = []
         for p in patterns:
             lines = [f"-- Pattern: {p.get('title', '')}"]
 
-            # metric_nature: string (legacy) or dict with what_it_measures etc. (enriched)
+            # ── Domain: metric_nature ─────────────────────────────────────
             nature = p.get("metric_nature", "")
             if isinstance(nature, dict):
                 what = nature.get("what_it_measures", "")
@@ -457,9 +507,17 @@ class KnowledgeBase:
                 when_str = "; ".join(when) if isinstance(when, list) else when
                 lines.append(f"-- Use when: {when_str}")
 
-            # sql_assets: graduated SQL templates (basic / intermediate / advanced)
+            # ── SQL pattern: concept_explanation ─────────────────────────
+            concept = p.get("concept_explanation", {})
+            if isinstance(concept, dict) and concept.get("what_it_does"):
+                lines.append(f"-- What it does: {concept['what_it_does']}")
+                key_behavior = concept.get("key_behavior", "")
+                if key_behavior:
+                    lines.append(f"-- Key behavior: {key_behavior}")
+
+            # ── Domain: sql_assets (graduated SQL) ────────────────────────
             sql_assets = p.get("sql_assets", {})
-            if isinstance(sql_assets, dict):
+            if isinstance(sql_assets, dict) and sql_assets:
                 for level in ("basic", "intermediate", "advanced"):
                     sql = sql_assets.get(level, "")
                     if sql:
@@ -467,12 +525,20 @@ class KnowledgeBase:
             elif isinstance(sql_assets, str) and sql_assets:
                 lines.append(f"-- SQL:\n{sql_assets}")
 
-            # Legacy single template field
+            # ── template field: string (legacy) or dict (SQL pattern) ─────
             template = p.get("template", "")
-            if template and not sql_assets:
+            if isinstance(template, dict) and template:
+                # SQL pattern: prefer minimal → realistic; skip composable (too long)
+                minimal = template.get("minimal", "")
+                realistic = template.get("realistic", "")
+                if minimal:
+                    lines.append(f"-- Template (minimal):\n{minimal}")
+                if realistic:
+                    lines.append(f"-- Template (realistic):\n{realistic}")
+            elif isinstance(template, str) and template and not sql_assets:
                 lines.append(f"-- Template:\n{template}")
 
-            # anti_patterns: list[str] (legacy) or list[dict] (enriched)
+            # ── Domain/Legacy: anti_patterns ─────────────────────────────
             anti = p.get("anti_patterns", [])
             if anti:
                 if isinstance(anti, list):
@@ -491,7 +557,83 @@ class KnowledgeBase:
                 elif isinstance(anti, str):
                     lines.append(f"-- Avoid: {anti}")
 
-            # inflation/deflation causes with optional detection SQL
+            # ── SQL pattern: mistake_patterns ─────────────────────────────
+            mistakes = p.get("mistake_patterns", [])
+            if isinstance(mistakes, list) and mistakes:
+                mistake_lines = []
+                for m in mistakes:
+                    if not isinstance(m, dict):
+                        continue
+                    mistake = m.get("mistake", "")
+                    goes_wrong = m.get("what_goes_wrong", "")
+                    good_sql = m.get("good_sql", "")
+                    if mistake:
+                        entry = f"   • {mistake}"
+                        if goes_wrong:
+                            entry += f": {goes_wrong}"
+                        mistake_lines.append(entry)
+                        if good_sql:
+                            mistake_lines.append(f"     Fix: {good_sql}")
+                if mistake_lines:
+                    lines.append("-- Common mistakes:\n" + "\n".join(mistake_lines))
+
+            # ── SQL pattern: dialect_traps ────────────────────────────────
+            traps = p.get("dialect_traps", [])
+            if isinstance(traps, list) and traps:
+                trap_lines = []
+                dl_key = f"{dialect.lower()}_behavior" if dialect else ""
+                for trap in traps:
+                    if not isinstance(trap, dict):
+                        continue
+                    construct = trap.get("construct", "")
+                    safe_alt = trap.get("safe_alternative", "")
+                    if dialect and dl_key in trap:
+                        behavior = trap[dl_key]
+                        entry = f"   • [{construct}] {behavior}"
+                    else:
+                        entry = f"   • [{construct}]" if construct else ""
+                    if entry:
+                        trap_lines.append(entry)
+                    if safe_alt:
+                        trap_lines.append(f"     Safe: {safe_alt}")
+                if trap_lines:
+                    lines.append("-- Dialect traps:\n" + "\n".join(trap_lines))
+
+            # ── SQL pattern: decision_logic ───────────────────────────────
+            dl = p.get("decision_logic", {})
+            if isinstance(dl, dict):
+                choose_when = dl.get("choose_this_when", [])
+                if isinstance(choose_when, list) and choose_when:
+                    lines.append("-- Choose this when:\n" +
+                                 "\n".join(f"   • {c}" for c in choose_when))
+
+            # ── SQL pattern: edge_cases ───────────────────────────────────
+            edge_cases = p.get("edge_cases", [])
+            if isinstance(edge_cases, list) and edge_cases:
+                ec_lines = []
+                for ec in edge_cases:
+                    if isinstance(ec, dict):
+                        scenario = ec.get("scenario", "")
+                        handling = ec.get("handling", "")
+                        if scenario:
+                            entry = f"   • {scenario}"
+                            if handling:
+                                entry += f" → {handling}"
+                            ec_lines.append(entry)
+                if ec_lines:
+                    lines.append("-- Edge cases:\n" + "\n".join(ec_lines))
+
+            # ── SQL pattern: performance_notes ────────────────────────────
+            perf = p.get("performance_notes", {})
+            if isinstance(perf, dict):
+                hint = perf.get("optimization_hint", "")
+                when_slow = perf.get("when_slow", "")
+                if hint:
+                    lines.append(f"-- Performance: {hint}")
+                elif when_slow:
+                    lines.append(f"-- Performance: slow when {when_slow}")
+
+            # ── Domain: inflation/deflation causes with detection SQL ──────
             for direction in ("inflation_causes", "deflation_causes"):
                 causes = p.get(direction, [])
                 if not isinstance(causes, list) or not causes:
@@ -511,7 +653,7 @@ class KnowledgeBase:
                 if cause_lines:
                     lines.append(f"-- {label}:\n" + "\n".join(cause_lines))
 
-            # causal_relationships: if/then diagnostic chains
+            # ── Domain: causal_relationships ──────────────────────────────
             causal = p.get("causal_relationships", [])
             if isinstance(causal, list) and causal:
                 causal_lines = []
@@ -533,6 +675,7 @@ class KnowledgeBase:
             if hints:
                 lines.append(f"-- Hints: {hints}")
 
+            # Legacy dialect_notes (domain JSONs)
             dialect_notes = p.get("dialect_notes", {})
             if dialect and isinstance(dialect_notes, dict) and dialect in dialect_notes:
                 lines.append(f"-- {dialect} note: {dialect_notes[dialect]}")
