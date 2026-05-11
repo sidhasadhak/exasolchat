@@ -3,14 +3,14 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "exachat"
-version = "0.4.1"
+name = "talonsight"
+version = "0.5.0"
 description = "Ask your database anything — safe text-to-SQL with local LLMs, RAG memory, and interactive charts."
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.9"
-authors = [{name = "exachat contributors"}]
-keywords = ["sql", "duckdb", "exasol", "llm", "text-to-sql", "streamlit", "ollama", "rag", "local-llm"]
+authors = [{name = "talonsight contributors"}]
+keywords = ["sql", "duckdb", "exasol", "llm", "text-to-sql", "streamlit", "ollama", "rag", "local-llm", "talonsight"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
@@ -53,13 +53,13 @@ all        = [
 dev        = ["pytest>=7.0", "ruff>=0.1"]
 
 [project.scripts]
-exachat = "exachat.cli:main"
+talonsight = "talonsight.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-exachat = ["knowledge_base/*.json"]
+talonsight = ["knowledge_base/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

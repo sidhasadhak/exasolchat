@@ -1,6 +1,6 @@
 """Metrics catalog — user-defined business metrics with SQL expressions.
 
-Metrics are stored as JSON files in ~/.exachat/metrics/ (or a custom path).
+Metrics are stored as JSON files in ~/.talonsight/metrics/ (or a custom path).
 They inject into the LLM prompt so "what is revenue?" uses the finance-approved
 formula, and they appear as calculated fields in the visual query builder.
 
@@ -38,7 +38,7 @@ class MetricsCatalog:
     """Persistent catalog of named business metrics."""
 
     def __init__(self, metrics_path: Optional[str] = None):
-        self._dir = Path(metrics_path or Path.home() / ".exachat" / "metrics")
+        self._dir = Path(metrics_path or Path.home() / ".talonsight" / "metrics")
         self._dir.mkdir(parents=True, exist_ok=True)
         self._metrics: dict[str, dict] = {}
         self._load()

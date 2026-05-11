@@ -1,4 +1,4 @@
-"""Core ExasolChat engine.
+"""Core TalonSight engine.
 
 Connects schema introspection, LLM generation, knowledge base retrieval,
 safety validation, query execution, and chart suggestion into a single
@@ -16,14 +16,14 @@ from typing import Optional
 
 import pandas as pd
 
-from exachat.builder import QueryBuilder
-from exachat.charts import auto_chart
-from exachat.connection import ConnectionConfig, DatabaseConnection
-from exachat.kb import KnowledgeBase, SchemaIndex, build_embedding_fn
-from exachat.llm import LLMBackend, LLMResponse, OllamaBackend
-from exachat.metrics import MetricsCatalog
-from exachat.safety import RiskLevel, SafetyVerdict, sanitize_sql, validate_sql
-from exachat.schema import (
+from talonsight.builder import QueryBuilder
+from talonsight.charts import auto_chart
+from talonsight.connection import ConnectionConfig, DatabaseConnection
+from talonsight.kb import KnowledgeBase, SchemaIndex, build_embedding_fn
+from talonsight.llm import LLMBackend, LLMResponse, OllamaBackend
+from talonsight.metrics import MetricsCatalog
+from talonsight.safety import RiskLevel, SafetyVerdict, sanitize_sql, validate_sql
+from talonsight.schema import (
     SchemaContext,
     introspect_duckdb,
     introspect_exasol,
@@ -59,11 +59,11 @@ class QueryResult:
             self.followups = []
 
 
-class ExasolChat:
+class TalonSight:
     """Main interface. Connect a database + LLM, ask questions, get answers.
 
     Usage:
-        chat = ExasolChat("duckdb:///data.duckdb")
+        chat = TalonSight("duckdb:///data.duckdb")
         result = chat.ask("What are the top 10 customers by revenue?")
         print(result.data)
     """
@@ -416,7 +416,7 @@ class ExasolChat:
 
     # ── Schema fingerprint + question cache ───────────────────────────
 
-    _CACHE_FILE = Path.home() / ".exachat" / "explore_cache.json"
+    _CACHE_FILE = Path.home() / ".talonsight" / "explore_cache.json"
     _CACHE_MAX  = 30  # keep at most this many schema fingerprints
 
     def _schema_fingerprint(self) -> str:

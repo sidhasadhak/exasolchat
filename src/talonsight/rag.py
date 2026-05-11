@@ -1,3 +1,3 @@
 # Replaced by kb.py — SQL pattern knowledge base.
 # This file is kept to avoid breaking any external imports during transition.
-from exachat.kb import KnowledgeBase  # noqa: F401
+from talonsight.kb import KnowledgeBase  # noqa: F401
