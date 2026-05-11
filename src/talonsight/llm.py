@@ -503,11 +503,11 @@ class MLXBackend(OpenAICompatibleBackend):
     _MLX_INSTALL_HINT = (
         "mlx-lm is not installed in this Python environment.\n\n"
         "  If you installed via pipx:\n"
-        "      pipx inject exachat mlx-lm\n\n"
+        "      pipx inject talonsight mlx-lm\n\n"
         "  If you installed via pip:\n"
         "      pip install mlx-lm\n\n"
         "  Or reinstall with the mlx extra:\n"
-        "      pip install exachat[mlx]"
+        "      pip install talonsight[mlx]"
     )
 
     def _start_and_wait(self, wait_secs: int = 180) -> bool:

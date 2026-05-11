@@ -1,9 +1,9 @@
-"""Interactive first-time setup wizard for exachat.
+"""Interactive first-time setup wizard for talonsight.
 
-Runs automatically on the first ``exachat`` invocation (no config file found).
-Re-run any time with ``exachat --setup``.
+Runs automatically on the first ``talonsight`` invocation (no config file found).
+Re-run any time with ``talonsight --setup``.
 
-Saved config: ~/.exachat/config.json
+Saved config: ~/.talonsight/config.json
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 # ── Config location ───────────────────────────────────────────────────────────
-CONFIG_PATH = Path.home() / ".exachat" / "config.json"
+CONFIG_PATH = Path.home() / ".talonsight" / "config.json"
 
 # ── Platform flag ─────────────────────────────────────────────────────────────
 IS_APPLE_SILICON = sys.platform == "darwin" and platform.machine() == "arm64"
@@ -55,7 +55,7 @@ def _hr(char: str = "─", width: int = 54) -> str:
 def _header() -> None:
     print()
     print(_b(_hr()))
-    print(_b("  ⚡ exachat — first-time setup"))
+    print(_b("  ⚡ talonsight — first-time setup"))
     print(_b(_hr()))
     print()
 
@@ -125,7 +125,7 @@ def _download_mlx(model: str) -> bool:
         # mlx_lm server does NOT auto-download; it will crash without the model.
         print(
             f"\n  {_y('⚠')}  huggingface_hub not found.\n"
-            f"  Download the model manually before starting exachat:\n"
+            f"  Download the model manually before starting talonsight:\n"
             f"      {_c('pip install huggingface_hub')}\n"
             f"      {_c(f'huggingface-cli download {model}')}\n"
         )
@@ -133,7 +133,7 @@ def _download_mlx(model: str) -> bool:
     except Exception as exc:
         print(
             f"\n  {_y('⚠')}  Download failed: {exc}\n"
-            f"  Download manually before starting exachat:\n"
+            f"  Download manually before starting talonsight:\n"
             f"      {_c(f'huggingface-cli download {model}')}\n"
         )
         return False
@@ -244,7 +244,7 @@ def run_setup() -> None:
         }
         _ensure_mlx_lm()
         _download_mlx(model)
-        print(f"  {_g('✓')} The MLX server will start automatically each time you run {_b('exachat')}.\n")
+        print(f"  {_g('✓')} The MLX server will start automatically each time you run {_b('talonsight')}.\n")
 
     elif backend == "Ollama":
         cfg = {
@@ -268,5 +268,5 @@ def run_setup() -> None:
         save_config(cfg)
         print(f"  {_g('✓')} Config saved → {_dim(str(CONFIG_PATH))}\n")
 
-    print(f"  {_b('Launching exachat…')}\n")
+    print(f"  {_b('Launching talonsight…')}\n")
     print(_dim(_hr()) + "\n")

@@ -11,8 +11,8 @@ import re
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from exachat.schema import SchemaContext
-    from exachat.metrics import MetricsCatalog
+    from talonsight.schema import SchemaContext
+    from talonsight.metrics import MetricsCatalog
 
 
 AGGREGATIONS = ["SUM", "AVG", "COUNT", "COUNT DISTINCT", "MIN", "MAX", "MEDIAN"]

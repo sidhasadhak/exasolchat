@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from exachat.schema import TableInfo
+    from talonsight.schema import TableInfo
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ class _FastEmbedEF:
 
     Requires the ``embeddings`` optional extra::
 
-        pip install exachat[embeddings]
+        pip install talonsight[embeddings]
 
     Falls back to ``_BagOfWordsEF`` with a warning if fastembed is not
     installed, so the rest of the app continues to work.
@@ -179,7 +179,7 @@ class _FastEmbedEF:
         except ImportError:
             warnings.warn(
                 "fastembed is not installed — semantic embeddings unavailable. "
-                "Run: pip install exachat[embeddings]  "
+                "Run: pip install talonsight[embeddings]  "
                 "Falling back to bag-of-words embeddings.",
                 RuntimeWarning,
                 stacklevel=2,
@@ -224,7 +224,7 @@ def build_embedding_fn(
     ----------
     backend:
         ``"bow"``       — offline bag-of-words (default, no setup needed)
-        ``"fastembed"`` — in-process via fastembed (``pip install exachat[embeddings]``)
+        ``"fastembed"`` — in-process via fastembed (``pip install talonsight[embeddings]``)
         ``"ollama"``    — Ollama embedding API (``ollama pull nomic-embed-text``)
         ``"openai"``    — OpenAI-compatible embedding API (LM Studio, etc.)
     url:
@@ -357,13 +357,13 @@ class KnowledgeBase:
         ef: Optional["_BagOfWordsEF | _SemanticEF"] = None,
     ):
         self._n_results = n_results
-        self._persist_dir = persist_dir or str(Path.home() / ".exachat" / "kb")
+        self._persist_dir = persist_dir or str(Path.home() / ".talonsight" / "kb")
         Path(self._persist_dir).mkdir(parents=True, exist_ok=True)
 
         import chromadb
         self._client = chromadb.PersistentClient(path=self._persist_dir)
         self._ef = ef if ef is not None else _BagOfWordsEF()
-        self._collection = self._get_or_create("exachat_kb")
+        self._collection = self._get_or_create("talonsight_kb")
 
         # Always load the built-in patterns
         self._load_builtin()
@@ -711,7 +711,7 @@ class SchemaIndex:
         persist_dir: Optional[str] = None,
         ef: Optional["_BagOfWordsEF | _SemanticEF"] = None,
     ):
-        self._persist_dir = persist_dir or str(Path.home() / ".exachat" / "schema_idx")
+        self._persist_dir = persist_dir or str(Path.home() / ".talonsight" / "schema_idx")
         Path(self._persist_dir).mkdir(parents=True, exist_ok=True)
         import chromadb
         self._client = chromadb.PersistentClient(path=self._persist_dir)

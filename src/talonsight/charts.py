@@ -1,4 +1,4 @@
-"""Auto-charting for ExasolChat query results.
+"""Auto-charting for TalonSight query results.
 
 LLM suggests a chart config; this module renders it with Plotly or Altair.
 Returns ("plotly", fig), ("altair", chart), or None.

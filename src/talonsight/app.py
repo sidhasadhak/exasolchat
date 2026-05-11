@@ -1,4 +1,4 @@
-"""Streamlit app for exachat."""
+"""Streamlit app for talonsight."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
 
-from exachat.app_builder import render_builder, render_metrics_tab
-from exachat.core import ExasolChat, QueryResult
-from exachat.connection import ConnectionConfig
-from exachat.llm import OllamaBackend, OpenAICompatibleBackend, MLXBackend
-from exachat.setup_wizard import load_config as _load_wizard_config
-from exachat.safety import RiskLevel
+from talonsight.app_builder import render_builder, render_metrics_tab
+from talonsight.core import TalonSight, QueryResult
+from talonsight.connection import ConnectionConfig
+from talonsight.llm import OllamaBackend, OpenAICompatibleBackend, MLXBackend
+from talonsight.setup_wizard import load_config as _load_wizard_config
+from talonsight.safety import RiskLevel
 
 load_dotenv()
 
@@ -28,7 +28,7 @@ _DEFAULT_METRICS_PATH   = os.environ.get("EXACHAT_METRICS_PATH", "")
 
 # ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="⚡ exachat",
+    page_title="⚡ talonsight",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -917,7 +917,7 @@ def _render_result(r: QueryResult, elapsed: float | None = None):
 
 # ── Sidebar ──────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## ⚡ exachat")
+    st.markdown("## ⚡ talonsight")
 
     st.divider()
 
@@ -1154,7 +1154,7 @@ with st.sidebar:
                     "OpenAI-compatible":      "openai",
                 }.get(_embed_backend, "bow")
 
-                chat = ExasolChat(
+                chat = TalonSight(
                     connection=config,
                     llm=llm,
                     schema=schema_param,
@@ -1226,7 +1226,7 @@ with st.sidebar:
             )
             if _IS_APPLE_SILICON:
                 st.caption(
-                    "Install once: `pip install exachat[mlx]`  \n"
+                    "Install once: `pip install talonsight[mlx]`  \n"
                     "The server starts automatically on first query — no terminal needed."
                 )
             else:
@@ -1254,7 +1254,7 @@ with st.sidebar:
                     # Build a temporary backend just for the ping
                     try:
                         if llm_type == "Ollama":
-                            from exachat.llm import OllamaBackend
+                            from talonsight.llm import OllamaBackend
                             _tmp = OllamaBackend(
                                 model=st.session_state.get("_sb_ollama_model", ""),
                                 base_url=st.session_state.get("_sb_ollama_url", ""),
@@ -1265,7 +1265,7 @@ with st.sidebar:
                                 model=st.session_state.get("_sb_mlx_model", ""),
                             )
                         else:
-                            from exachat.llm import OpenAICompatibleBackend
+                            from talonsight.llm import OpenAICompatibleBackend
                             _tmp = OpenAICompatibleBackend(
                                 base_url=st.session_state.get("_sb_api_url", ""),
                                 model=st.session_state.get("_sb_api_model", ""),
@@ -1343,7 +1343,7 @@ with st.sidebar:
         st.text_input(
             "Metrics directory",
             key="_sb_metrics_path",
-            placeholder="~/.exachat/metrics/",
+            placeholder="~/.talonsight/metrics/",
             help="Set EXACHAT_METRICS_PATH in .env to pre-fill.",
         )
 
@@ -1376,7 +1376,7 @@ with st.sidebar:
 
 # ── Main area ────────────────────────────────────────────────────────
 if not st.session_state.connected:
-    st.markdown("## ⚡ exachat")
+    st.markdown("## ⚡ talonsight")
     st.markdown(
         "Connect to your database in the sidebar, then ask questions in plain English. "
         "Powered by local LLMs and a built-in SQL pattern knowledge base."
@@ -1390,8 +1390,8 @@ if not st.session_state.connected:
     with col1:
         st.markdown("#### Python API")
         st.code(
-            'from exachat import ExasolChat\n\n'
-            'chat = ExasolChat(\n'
+            'from talonsight import TalonSight\n\n'
+            'chat = TalonSight(\n'
             '    "duckdb:///data.duckdb"\n'
             ')\n'
             'result = chat.ask("Top 10 customers by revenue")\n'
@@ -1401,8 +1401,8 @@ if not st.session_state.connected:
     with col2:
         st.markdown("#### DuckDB")
         st.code(
-            'from exachat import ExasolChat\n\n'
-            'chat = ExasolChat("./analytics.duckdb")\n\n'
+            'from talonsight import TalonSight\n\n'
+            'chat = TalonSight("./analytics.duckdb")\n\n'
             'result = chat.ask("Monthly trends")\n'
             'print(result.summary)',
             language="python",
@@ -1411,9 +1411,9 @@ if not st.session_state.connected:
         st.markdown("#### CLI")
         st.code(
             '# Install\n'
-            'pip install exachat\n\n'
+            'pip install talonsight\n\n'
             '# Launch\n'
-            'exachat',
+            'talonsight',
             language="bash",
         )
     st.stop()
@@ -1433,7 +1433,7 @@ st.markdown(
 )
 
 # ── Tabbed interface ─────────────────────────────────────────────────
-chat_engine: ExasolChat = st.session_state.chat
+chat_engine: TalonSight = st.session_state.chat
 
 # JS reinforcement for sticky tabs (CSS alone unreliable inside Streamlit's scroll container)
 import streamlit.components.v1 as _stc
@@ -1493,7 +1493,7 @@ _stc.html("""<script>
 
     /* ── floating ↓ button ── */
     var btn = pdoc.createElement('button');
-    btn.id = 'exachat-scroll-btn';
+    btn.id = 'talonsight-scroll-btn';
     btn.title = 'Scroll to bottom';
     btn.innerHTML = '&#8595;';
     Object.assign(btn.style, {
@@ -1655,7 +1655,7 @@ with tab_metrics:
 # ── SCHEMA MAP tab ────────────────────────────────────────────────────
 with tab_schema:
     import re as _re2
-    from exachat.schema import get_join_map
+    from talonsight.schema import get_join_map
 
     tables = chat_engine.schema_context.tables
     jmap   = get_join_map(tables)

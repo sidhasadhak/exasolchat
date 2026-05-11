@@ -74,7 +74,7 @@ def _wait_for_mlx(url: str, proc: "subprocess.Popen[bytes]",
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    from exachat.setup_wizard import CONFIG_PATH, load_config, run_setup
+    from talonsight.setup_wizard import CONFIG_PATH, load_config, run_setup
 
     _BOLD  = "\033[1m"
     _GREEN = "\033[32m"
@@ -82,7 +82,7 @@ def main() -> None:
     _CYAN  = "\033[36m"
     _RST   = "\033[0m"
 
-    # ── Strip exachat-specific flags before forwarding args to Streamlit ──
+    # ── Strip talonsight-specific flags before forwarding args to Streamlit ──
     args = sys.argv[1:]
     force_setup = "--setup" in args
     args = [a for a in args if a != "--setup"]
@@ -128,7 +128,7 @@ def main() -> None:
 
         # Pre-flight 2: ensure model weights are on disk — download if missing
         if _mlx_ok:
-            from exachat.setup_wizard import _mlx_model_cached, _download_mlx
+            from talonsight.setup_wizard import _mlx_model_cached, _download_mlx
             if not _mlx_model_cached(model):
                 print(f"\n  {_YELL}!{_RST}  Model {_CYAN}{model}{_RST} not found in cache — downloading now…")
                 if not _download_mlx(model):

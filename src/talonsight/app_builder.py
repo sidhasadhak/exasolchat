@@ -12,12 +12,12 @@ from typing import Optional, TYPE_CHECKING
 import streamlit as st
 import streamlit.components.v1 as components
 
-from exachat.builder import AGGREGATIONS, FILTER_OPS, QueryBuilder, _is_numeric
-from exachat.safety import RiskLevel, validate_sql
+from talonsight.builder import AGGREGATIONS, FILTER_OPS, QueryBuilder, _is_numeric
+from talonsight.safety import RiskLevel, validate_sql
 
 if TYPE_CHECKING:
-    from exachat.core import ExasolChat
-    from exachat.metrics import MetricsCatalog
+    from talonsight.core import TalonSight
+    from talonsight.metrics import MetricsCatalog
 
 
 # ── Session state ─────────────────────────────────────────────────────
@@ -43,11 +43,11 @@ def _empty_config(table: str) -> dict:
 # ── Main entry point ──────────────────────────────────────────────────
 
 def render_builder(
-    chat: "ExasolChat",
+    chat: "TalonSight",
     qb: QueryBuilder,
     metrics_catalog: Optional["MetricsCatalog"] = None,
 ) -> None:
-    from exachat.charts import auto_chart
+    from talonsight.charts import auto_chart
 
     tables = qb.table_names()
     if not tables:
@@ -339,7 +339,7 @@ def render_builder(
             _b_y1 = [c for c in b_measures if c not in b_y2]
             if b_viz != "table only" and (_b_y1 or b_y2) and b_xax:
                 try:
-                    from exachat.app import _build_chart_figure
+                    from talonsight.app import _build_chart_figure
                     _ct = b_viz if b_viz != "auto" else "bar"
                     _fig = _build_chart_figure(df, b_xax, _b_y1, b_y2, _ct)
                     st.plotly_chart(_fig, use_container_width=True)
