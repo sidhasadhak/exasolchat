@@ -495,6 +495,52 @@ class TalonSight:
         """Clear session conversation history (for new chat)."""
         self._history.clear()
 
+    # ── Data Quality Scan ─────────────────────────────────────────────
+
+    def run_dq_scan(
+        self,
+        table_name: str,
+        config: Optional[dict] = None,
+        config_path: Optional[str] = None,
+        on_progress=None,
+    ) -> list:
+        """Run a data-quality scan against a single table.
+
+        Parameters
+        ----------
+        table_name:   Name of the table to scan (must exist in the connected schema).
+        config:       Optional DQ config dict (overrides built-in dq_config.json).
+        config_path:  Optional path to a custom DQ config JSON file.
+        on_progress:  Optional callback(current, total, rule, col) for UI updates.
+
+        Returns a list of ``DQResult`` objects sorted by severity × failure rate.
+        Raises ``ValueError`` if the table is not found in the connected schema.
+        """
+        from talonsight.dq import DataQualityScanner
+
+        # Resolve TableInfo
+        table_info = next(
+            (t for t in self.schema_context.tables
+             if t.name.lower() == table_name.lower()
+             or f"{t.schema}.{t.name}".lower() == table_name.lower()),
+            None,
+        )
+        if table_info is None:
+            raise ValueError(
+                f"Table '{table_name}' not found in the connected schema. "
+                f"Available: {[t.name for t in self.schema_context.tables]}"
+            )
+
+        scanner = DataQualityScanner(config=config, config_path=config_path)
+        return scanner.run(
+            table_name=table_name,
+            table_info=table_info,
+            db=self._db,
+            dialect=self.schema_context.dialect or "",
+            llm=self.llm,
+            on_progress=on_progress,
+        )
+
     def close(self):
         """Close database connection."""
         self._db.close()

@@ -1556,8 +1556,8 @@ _stc.html("""<script>
 })();
 </script>""", height=0)
 
-tab_ask, tab_build, tab_metrics, tab_schema = st.tabs(
-    ["💬 Ask", "📊 Build", "📐 Metrics", "🗺️ Schema"]
+tab_ask, tab_build, tab_metrics, tab_dq, tab_schema = st.tabs(
+    ["💬 Ask", "📊 Build", "📐 Metrics", "🔍 Data Quality", "🗺️ Schema"]
 )
 
 # ── ASK tab ──────────────────────────────────────────────────────────
@@ -1648,6 +1648,108 @@ with tab_build:
 # ── METRICS tab ──────────────────────────────────────────────────────
 with tab_metrics:
     render_metrics_tab(chat_engine.metrics_catalog)
+
+# ── DATA QUALITY tab ─────────────────────────────────────────────────
+with tab_dq:
+    st.markdown("### 🔍 Data Quality Scan")
+    st.caption(
+        "Run automated data-quality checks on any connected table — "
+        "null rates, blank strings, date format validation, rare categorical values, "
+        "duplicate rows, and LLM-detected logical constraint violations."
+    )
+
+    _dq_tables = [t.name for t in chat_engine.schema_context.tables]
+
+    if not _dq_tables:
+        st.info("Connect to a database first.")
+    else:
+        _col_sel, _col_btn = st.columns([3, 1])
+        with _col_sel:
+            _dq_table = st.selectbox(
+                "Table to scan",
+                _dq_tables,
+                key="_dq_selected_table",
+            )
+        with _col_btn:
+            st.write("")   # vertical spacer
+            _dq_run = st.button("▶ Run Scan", use_container_width=True, type="primary")
+
+        if _dq_run:
+            st.session_state["_dq_results"] = None
+            st.session_state["_dq_scanned_table"] = _dq_table
+
+            _dq_progress_text = st.empty()
+            _dq_bar = st.progress(0)
+
+            def _dq_on_progress(current, total, rule, col):
+                pct = int(current / total * 100)
+                _dq_bar.progress(pct)
+                _dq_progress_text.caption(
+                    f"Running check {current}/{total}: `{rule}` on `{col}`"
+                )
+
+            try:
+                _dq_raw = chat_engine.run_dq_scan(
+                    _dq_table, on_progress=_dq_on_progress
+                )
+                st.session_state["_dq_results"] = _dq_raw
+            except Exception as _dq_err:
+                st.error(f"Scan failed: {_dq_err}")
+            finally:
+                _dq_bar.empty()
+                _dq_progress_text.empty()
+
+        # ── Display results ───────────────────────────────────────────
+        _dq_results = st.session_state.get("_dq_results")
+        _dq_for_table = st.session_state.get("_dq_scanned_table", "")
+
+        if _dq_results is not None:
+            if not _dq_results:
+                st.success(f"✅ No issues found in `{_dq_for_table}`.")
+            else:
+                from talonsight.dq import SEVERITY_COLOR
+                import pandas as _pd_dq
+
+                _sev_counts = {}
+                for r in _dq_results:
+                    _sev_counts[r.severity] = _sev_counts.get(r.severity, 0) + 1
+
+                # Summary pills
+                _pill_cols = st.columns(len(_sev_counts))
+                for _pi, (_sev, _cnt) in enumerate(
+                    sorted(_sev_counts.items(), key=lambda x: {"critical":0,"high":1,"medium":2,"low":3}.get(x[0],9))
+                ):
+                    _pill_cols[_pi].metric(
+                        f"{SEVERITY_COLOR.get(_sev,'⚪')} {_sev.capitalize()}",
+                        _cnt
+                    )
+
+                st.divider()
+
+                # Full results table
+                _rows = []
+                for r in _dq_results:
+                    _rows.append({
+                        "Sev": f"{r.severity_icon} {r.severity}",
+                        "Rule": r.rule_name,
+                        "Column": r.column_name,
+                        "Failed": f"{r.failed_count:,}",
+                        "Rate": r.failure_pct,
+                        "Sample values": ", ".join(r.sample_failed_values[:3]) if r.sample_failed_values else "—",
+                        "Error": r.error or "",
+                    })
+
+                _df_dq = _pd_dq.DataFrame(_rows)
+                st.dataframe(_df_dq, use_container_width=True, hide_index=True)
+
+                # Expandable SQL per result
+                with st.expander("🔎 View generated SQL for each check", expanded=False):
+                    for r in _dq_results:
+                        if r.failed_count > 0 or r.error:
+                            st.markdown(
+                                f"**{r.severity_icon} {r.rule_name}** — `{r.column_name}`"
+                            )
+                            st.code(r.generated_sql, language="sql")
 
 # ── SCHEMA MAP tab ────────────────────────────────────────────────────
 with tab_schema:

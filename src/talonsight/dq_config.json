@@ -1,0 +1,76 @@
+{
+  "assessment_config": {
+    "row_limit_sample": 1000,
+    "null_threshold_warning": 0.05,
+    "null_threshold_critical": 0.2,
+    "rare_value_threshold": 0.01,
+    "duplicate_row_check": true,
+    "whitespace_check": true,
+    "regex_checks_enabled": true,
+    "categorical_drift_check": true,
+    "numeric_validation_check": true,
+    "date_validation_check": true,
+    "logical_consistency_check": true
+  },
+
+  "column_profile_rules": {
+    "infer_types": true,
+    "type_inference_rules": {
+      "date_like_columns": ["*_date", "*_dt", "*_time", "*_at", "*_timestamp", "date_*", "time_*"],
+      "email_columns":     ["email", "*_email", "email_*"],
+      "id_columns":        ["*_id", "id", "uuid", "*_uuid", "*_key"],
+      "numeric_columns":   ["amount", "*amount", "price", "*price", "cost", "*cost",
+                            "value", "*_value", "*_num", "*_count", "*_total", "*_sum",
+                            "quantity", "qty", "*_qty", "revenue", "*revenue",
+                            "profit", "discount", "weight", "score", "*_score",
+                            "rate", "*_rate", "fee", "*_fee"],
+      "categorical_columns": ["status", "type", "category", "flag", "*_status",
+                              "*_type", "*_category", "state", "*_state", "gender",
+                              "country", "currency", "*_code"]
+    }
+  },
+
+  "checks": [
+    {
+      "rule_name": "null_check",
+      "applies_to": "all_columns",
+      "severity_map": { "low": 0.01, "medium": 0.05, "high": 0.2 }
+    },
+    {
+      "rule_name": "blank_string_check",
+      "applies_to": "string_columns",
+      "severity": "medium"
+    },
+    {
+      "rule_name": "whitespace_anomaly",
+      "applies_to": "string_columns",
+      "severity": "low"
+    },
+    {
+      "rule_name": "invalid_date_check",
+      "applies_to": "date_like_columns",
+      "severity": "high"
+    },
+    {
+      "rule_name": "numeric_format_validation",
+      "applies_to": "numeric_string_columns",
+      "severity": "high"
+    },
+    {
+      "rule_name": "rare_value_detection",
+      "applies_to": "categorical_columns",
+      "threshold": 0.01,
+      "severity": "medium"
+    },
+    {
+      "rule_name": "duplicate_rows",
+      "applies_to": "entire_table",
+      "severity": "high"
+    },
+    {
+      "rule_name": "logical_consistency",
+      "applies_to": "inferred_pairs",
+      "severity": "critical"
+    }
+  ]
+}
