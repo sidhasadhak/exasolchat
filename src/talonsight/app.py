@@ -1070,7 +1070,7 @@ with st.sidebar:
                                  "http://localhost:8080/v1" if _IS_APPLE_SILICON else ""),
         "_sb_mlx_model":     _wiz.get("mlx_model",
                                  "mlx-community/Qwen3-8B-4bit" if _IS_APPLE_SILICON else ""),
-        "_sb_embed_backend": "Auto-detect",
+        "_sb_embed_backend": "Bag of words (offline)",
         "_sb_embed_url":     "",
         "_sb_embed_model":   "nomic-embed-text",
         "_sb_extra_context": "",
@@ -1160,18 +1160,9 @@ with st.sidebar:
 
                 # Map sidebar label → backend key used by build_embedding_fn
                 _embed_backend_key = {
-                    "Auto-detect":            "auto",
                     "Bag of words (offline)": "bow",
-                    "FastEmbed (in-process)": "fastembed",
                     "Ollama":                 "ollama",
-                    "OpenAI-compatible":      "openai",
-                }.get(_embed_backend, "auto")
-
-                # For auto-detect, hint with the Ollama LLM URL when the user
-                # chose Ollama as their LLM backend — same server, same port.
-                _resolved_embed_url = _embed_url.strip()
-                if _embed_backend_key == "auto" and not _resolved_embed_url:
-                    _resolved_embed_url = st.session_state.get("_sb_ollama_url", "").strip()
+                }.get(_embed_backend, "bow")
 
                 chat = TalonSight(
                     connection=config,
@@ -1185,7 +1176,7 @@ with st.sidebar:
                     chart_library=_chart_lib,
                     metrics_path=_metrics_path.strip() or None,
                     embedding_backend=_embed_backend_key,
-                    embedding_url=_resolved_embed_url,
+                    embedding_url=_embed_url.strip(),
                     embedding_model=_embed_model.strip() or "nomic-embed-text",
                 )
 
@@ -1304,58 +1295,33 @@ with st.sidebar:
     with st.expander("🔢 Embeddings", expanded=False):
         embed_backend = st.selectbox(
             "Backend",
-            ["Auto-detect", "Bag of words (offline)", "Ollama", "OpenAI-compatible", "FastEmbed (in-process)"],
+            ["Bag of words (offline)", "Ollama"],
             key="_sb_embed_backend",
             help=(
-                "Auto-detect (default): uses Ollama nomic-embed-text if available, "
-                "otherwise falls back to fast bag-of-words — no download ever required. "
-                "Select Ollama explicitly to set a custom URL or model."
+                "Bag of words is the default — instant, no download, works offline. "
+                "Switch to Ollama for 768-dim semantic embeddings using nomic-embed-text "
+                "(run: ollama pull nomic-embed-text)."
             ),
         )
-        if embed_backend == "Auto-detect":
-            st.session_state["_sb_embed_url"] = ""
-            st.caption(
-                "🔍 Probes Ollama at `localhost:11434` on connect.  \n"
-                "• **nomic-embed-text pulled** → semantic embeddings (768-dim)  \n"
-                "• **Ollama absent / model not pulled** → bag-of-words (instant, offline)  \n"
-                "Run `ollama pull nomic-embed-text` once to upgrade automatically."
-            )
-        elif embed_backend == "Ollama":
-            st.text_input(
-                "Ollama URL",
-                key="_sb_embed_url",
-                placeholder="http://localhost:11434",
-            )
+        if embed_backend == "Ollama":
+            # Auto-load URL from the Ollama LLM backend setting
+            _auto_ollama_url = st.session_state.get("_sb_ollama_url", "").strip() or "http://localhost:11434"
+            st.session_state["_sb_embed_url"] = _auto_ollama_url
             st.text_input(
                 "Model",
                 key="_sb_embed_model",
                 help="Run: ollama pull nomic-embed-text",
             )
-            st.caption("`ollama pull nomic-embed-text`")
-        elif embed_backend == "OpenAI-compatible":
-            st.text_input(
-                "API URL",
-                key="_sb_embed_url",
-                placeholder="http://localhost:1234/v1",
-            )
-            st.text_input("Model", key="_sb_embed_model")
-        elif embed_backend == "FastEmbed (in-process)":
-            st.text_input(
-                "Model",
-                key="_sb_embed_model",
-                help="Any fastembed-compatible model. Default: nomic-ai/nomic-embed-text-v1.5",
-            )
-            st.session_state["_sb_embed_url"] = ""
             st.caption(
-                "Runs fully in-process — no server required.  \n"
-                "Model (~130 MB) is downloaded once on first connect and cached locally."
+                f"URL auto-loaded from Ollama LLM setting: `{_auto_ollama_url}`  \n"
+                "Run `ollama pull nomic-embed-text` once to enable semantic search."
             )
         else:
             # Bag of words — no fields needed
             st.session_state["_sb_embed_url"] = ""
             st.caption(
-                "Offline MD5-hashed keyword matching — no model download, no server.  \n"
-                "Upgrade to **Auto-detect** to get semantic embeddings via Ollama."
+                "Offline keyword matching — no model download, no server required.  \n"
+                "Switch to **Ollama** for semantic embeddings via `nomic-embed-text`."
             )
 
     # ── 6. KNOWLEDGE BASE ─────────────────────────────────────────────

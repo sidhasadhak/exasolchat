@@ -82,7 +82,7 @@ class TalonSight:
         kb_path: Optional[str] = None,
         chart_library: str = "auto",
         metrics_path: Optional[str] = None,
-        embedding_backend: str = "auto",
+        embedding_backend: str = "bow",
         embedding_url: str = "",
         embedding_model: str = "nomic-embed-text",
     ):

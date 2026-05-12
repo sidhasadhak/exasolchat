@@ -149,138 +149,35 @@ class _SemanticEF:
             return [d["embedding"] for d in sorted(data, key=lambda x: x["index"])]
 
 
-class _FastEmbedEF:
-    """In-process semantic embeddings via fastembed (no server required).
-
-    Uses the ``nomic-ai/nomic-embed-text-v1.5`` model by default — a 768-dim
-    model (~130 MB) that is downloaded once on first use and cached locally.
-    Runs on CPU via ONNX; on Apple Silicon this is accelerated automatically.
-
-    Requires the ``embeddings`` optional extra::
-
-        pip install talonsight[embeddings]
-
-    Falls back to ``_BagOfWordsEF`` with a warning if fastembed is not
-    installed, so the rest of the app continues to work.
-    """
-
-    DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
-
-    def __init__(self, model: str = DEFAULT_MODEL) -> None:
-        self._model_name = model or self.DEFAULT_MODEL
-        self._model = None          # lazy — loaded on first embed call
-        self._fallback = _BagOfWordsEF()
-        self.available = False
-
-        try:
-            from fastembed import TextEmbedding  # noqa: F401 — just probe import
-            self._TextEmbedding = TextEmbedding
-            self.available = True
-        except ImportError:
-            warnings.warn(
-                "fastembed is not installed — semantic embeddings unavailable. "
-                "Run: pip install talonsight[embeddings]  "
-                "Falling back to bag-of-words embeddings.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-
-    # ── ChromaDB EF protocol ──────────────────────────────────────────
-
-    def name(self) -> str:
-        model_hash = hashlib.md5(self._model_name.encode()).hexdigest()[:8]
-        return f"fastembed-{model_hash}"
-
-    def __call__(self, input: list[str]) -> list[list[float]]:
-        if not self.available:
-            return self._fallback(input)
-        try:
-            m = self._get_model()
-            return [e.tolist() for e in m.embed(input)]
-        except Exception as exc:
-            logger.warning("FastEmbed call failed (%s); using bag-of-words.", exc)
-            return self._fallback(input)
-
-    def embed_query(self, input: list[str]) -> list[list[float]]:
-        return self.__call__(input)
-
-    # ── Internals ─────────────────────────────────────────────────────
-
-    def _get_model(self):
-        """Lazy model load — downloads on first call, cached afterwards."""
-        if self._model is None:
-            self._model = self._TextEmbedding(self._model_name)
-        return self._model
-
-
-def _detect_best_ef(
-    url: str = "http://localhost:11434",
-    model: str = "nomic-embed-text",
-) -> "_BagOfWordsEF | _SemanticEF":
-    """Probe Ollama; return a SemanticEF if ``model`` is pulled, else BagOfWordsEF.
-
-    The probe is a single GET to ``/api/tags`` with a 2-second timeout, so it
-    never blocks the connect flow for more than 2 s.  On any failure (Ollama
-    not running, model not pulled, network error) it silently returns BOW.
-    """
-    try:
-        import httpx
-        resp = httpx.get(f"{url.rstrip('/')}/api/tags", timeout=2.0)
-        resp.raise_for_status()
-        pulled = [m["name"].split(":")[0] for m in resp.json().get("models", [])]
-        if model in pulled:
-            ef = _SemanticEF(base_url=url, model=model, api_type="ollama")
-            if ef.available:
-                logger.info("Auto-detect: Ollama %s available — using semantic embeddings.", model)
-                return ef
-    except Exception:
-        pass
-    logger.info("Auto-detect: Ollama not available — using bag-of-words embeddings.")
-    return _BagOfWordsEF()
-
-
 def build_embedding_fn(
-    backend: str = "auto",
+    backend: str = "bow",
     url: str = "",
     model: str = "",
-) -> "_BagOfWordsEF | _FastEmbedEF | _SemanticEF":
+) -> "_BagOfWordsEF | _SemanticEF":
     """Return the right ChromaDB embedding function for the given backend.
 
     Parameters
     ----------
     backend:
-        ``"auto"``      — probe Ollama for ``nomic-embed-text``; fall back to BOW
-        ``"bow"``       — offline bag-of-words (no setup needed)
-        ``"fastembed"`` — in-process via fastembed (``pip install talonsight[embeddings]``)
-        ``"ollama"``    — Ollama embedding API (``ollama pull nomic-embed-text``)
-        ``"openai"``    — OpenAI-compatible embedding API (LM Studio, etc.)
+        ``"bow"``    — offline bag-of-words (default, no setup needed)
+        ``"ollama"`` — Ollama embedding API (``ollama pull nomic-embed-text``)
+        ``"openai"`` — OpenAI-compatible embedding API (programmatic use)
     url:
         Base URL for server-backed backends.
         Ollama default : ``http://localhost:11434``
         OpenAI default : ``http://localhost:1234/v1``
     model:
-        Embedding model name.
-        auto / Ollama   : ``nomic-embed-text``
-        fastembed       : ``nomic-ai/nomic-embed-text-v1.5``
+        Embedding model name.  Defaults to ``nomic-embed-text`` for Ollama.
     """
     if not backend or backend == "bow":
         return _BagOfWordsEF()
-
-    if backend == "auto":
-        resolved_url   = url.strip()   or "http://localhost:11434"
-        resolved_model = model.strip() or "nomic-embed-text"
-        return _detect_best_ef(url=resolved_url, model=resolved_model)
-
-    if backend == "fastembed":
-        fe_model = model.strip() or _FastEmbedEF.DEFAULT_MODEL
-        return _FastEmbedEF(model=fe_model)
 
     # Server-backed: ollama or openai
     defaults = {
         "ollama": "http://localhost:11434",
         "openai": "http://localhost:1234/v1",
     }
-    resolved_url = url.strip() or defaults.get(backend, "http://localhost:11434")
+    resolved_url   = url.strip()   or defaults.get(backend, "http://localhost:11434")
     resolved_model = model.strip() or "nomic-embed-text"
     return _SemanticEF(base_url=resolved_url, model=resolved_model, api_type=backend)
 
