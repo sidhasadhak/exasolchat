@@ -175,7 +175,12 @@ class TalonSight:
 
         # Business model — persists confirmed findings across sessions
         from talonsight.memory import BusinessModel
-        _conn_id = f"{self._config.db_type}_{self._config.database or 'default'}"
+        _conn_id = (
+            self._config.duckdb_path
+            or self._config.sqlalchemy_url
+            or getattr(self._config, "exasol_host", None)
+            or "default"
+        )
         self.business_model = BusinessModel(_conn_id)
 
         self._history: list[QueryResult] = []
