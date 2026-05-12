@@ -30,16 +30,12 @@ dependencies = [
     "httpx>=0.25",
     "chromadb>=0.4",
     "python-dotenv>=1.0",
-    # In-process semantic embeddings via ONNX — no server required.
-    # nomic-embed-text model (~130 MB) is downloaded once on first connect and cached locally.
-    "fastembed>=0.3",
 ]
 
 [project.optional-dependencies]
 exasol     = ["pyexasol>=0.25", "sqlalchemy-exasol>=5.0"]
 postgres   = ["psycopg2-binary>=2.9"]
 mysql      = ["pymysql>=1.1"]
-# kept for backwards-compat; fastembed is now a base dependency
 embeddings = ["fastembed>=0.3"]
 # mlx-lm only installs on Apple Silicon (arm64 macOS); skipped silently elsewhere
 mlx        = ["mlx-lm>=0.22; sys_platform=='darwin' and platform_machine=='arm64'"]
@@ -47,7 +43,6 @@ all        = [
     "pyexasol>=0.25", "sqlalchemy-exasol>=5.0",
     "psycopg2-binary>=2.9",
     "pymysql>=1.1",
-    "fastembed>=0.3",
     "mlx-lm>=0.22; sys_platform=='darwin' and platform_machine=='arm64'",
 ]
 dev        = ["pytest>=7.0", "ruff>=0.1"]
@@ -59,7 +54,7 @@ talonsight = "talonsight.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-talonsight = ["knowledge_base/*.json"]
+talonsight = ["knowledge_base/*.json", "dq_config.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
