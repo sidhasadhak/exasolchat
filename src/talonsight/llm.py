@@ -703,6 +703,18 @@ class OllamaBackend(LLMBackend):
             )
 
         raw_calls = msg.get("tool_calls") or []
+        content = msg.get("content") or ""
+        fallback_used = False
+
+        # ── Fallback parsers for models whose tool calls land in content ──
+        # Some Ollama model versions don't convert native tool-call formats
+        # into the tool_calls field — we parse them out of content instead.
+        if not raw_calls and content:
+            raw_calls = self._parse_content_tool_calls(content, tools)
+            if raw_calls:
+                content = ""        # consumed — don't treat as narrative
+                fallback_used = True
+
         normalised = []
         for tc in raw_calls:
             fn = tc.get("function", {})
@@ -718,11 +730,90 @@ class OllamaBackend(LLMBackend):
                 "id": None,  # Ollama does not use tool_call_id
             })
 
+        # When fallback parsing fired, rebuild raw_assistant_msg in the
+        # Ollama tool_calls format so the next conversation turn is valid.
+        if fallback_used and normalised:
+            msg = {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": n["name"], "arguments": n["arguments"]}}
+                    for n in normalised
+                ],
+            }
+
         return ToolResponse(
-            content=msg.get("content") or "",
+            content=content,
             tool_calls=normalised,
             raw_assistant_msg=msg,
         )
+
+    @staticmethod
+    def _parse_content_tool_calls(content: str, tools: list[dict]) -> list[dict]:
+        """Extract tool calls from content when Ollama doesn't populate tool_calls.
+
+        Handles two formats that models emit when native tool-call conversion fails:
+
+        1. Hermes3 / ChatML XML format:
+               <tool_call>{"name": "fn", "arguments": {...}}</tool_call>
+
+        2. JSON object where keys are (partial) tool names and values are arguments
+           (seen when models improvise a response plan rather than using tool_calls):
+               {"create_plan": {"steps": [...]}, "list_tables": {}}
+        """
+        calls = []
+        known_names = {t["function"]["name"] for t in tools}
+
+        # ── Format 1: <tool_call> XML blocks (hermes3 native) ────────────
+        xml_matches = re.findall(
+            r"<tool_call>\s*(\{.*?\})\s*</tool_call>", content, re.DOTALL
+        )
+        for raw in xml_matches:
+            try:
+                parsed = json.loads(raw)
+                name = parsed.get("name", "")
+                if name in known_names:
+                    calls.append({
+                        "function": {
+                            "name": name,
+                            "arguments": parsed.get("arguments", {}),
+                        }
+                    })
+            except Exception:
+                pass
+        if calls:
+            return calls
+
+        # ── Format 2: JSON object with tool-name keys ─────────────────────
+        # e.g. {"plan": {"steps": [...]}, "tables": {}} where keys approximate
+        # tool names. Match by exact name first, then by substring.
+        try:
+            cleaned = re.sub(r"```json\s*|```", "", content).strip()
+            obj = json.loads(cleaned)
+            if isinstance(obj, dict):
+                # Build a lookup: full_tool_name → any key that is a substring match
+                for key, val in obj.items():
+                    key_lower = key.lower().replace("_", "").replace(" ", "")
+                    for tool_name in known_names:
+                        tool_lower = tool_name.lower().replace("_", "")
+                        if key_lower == tool_lower or key_lower in tool_lower or tool_lower in key_lower:
+                            args = val if isinstance(val, dict) else {}
+                            calls.append({
+                                "function": {"name": tool_name, "arguments": args}
+                            })
+                            break
+        except Exception:
+            pass
+
+        # Deduplicate: keep first occurrence of each tool name
+        seen: set[str] = set()
+        deduped = []
+        for c in calls:
+            n = c["function"]["name"]
+            if n not in seen:
+                seen.add(n)
+                deduped.append(c)
+        return deduped
 
     def supports_tool_calling(self) -> tuple[bool, str]:
         """Probe the model with a minimal tool schema to verify support."""

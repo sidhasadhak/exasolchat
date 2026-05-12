@@ -1395,15 +1395,15 @@ with st.sidebar:
                 "Agent mode runs a multi-step autonomous investigation instead of "
                 "a single SQL query. The agent plans, explores the schema, executes "
                 "iterative queries, and synthesises a narrative answer.\n\n"
-                "⚡ Recommended models: hermes3, llama3.1, qwen2.5\n"
-                "📥 Install: ollama pull hermes3"
+                "⚡ Recommended models: qwen3.5:9b, hermes3, llama3.1\n"
+                "📥 Install: ollama pull qwen3.5:9b"
             ),
         )
         if st.session_state.get("_sb_agent_mode"):
             st.caption(
                 "🧠 **Agent mode active** — each question triggers a full investigation "
                 "(5–12 tool calls, ~30–60s on 8B models).  \n"
-                "Recommended: `ollama pull hermes3`"
+                "Best models: `qwen3.5:9b` · `hermes3` · `llama3.1:8b`"
             )
             st.slider(
                 "Max investigation steps",
