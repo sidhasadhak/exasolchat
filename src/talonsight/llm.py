@@ -324,6 +324,36 @@ Use "table_only" if the data isn't well-suited for charting (e.g., single row, t
 
         # ── Type / cast errors ────────────────────────────────────────────────
 
+        # interval / interval — must come before the generic operator check
+        # because "operator does not exist: interval / interval" matches both
+        if "interval" in e and (
+            "/ interval" in e or "interval /" in e
+            or ("operator does not exist" in e and "interval" in e)
+        ):
+            return (
+                "DIAGNOSIS: PostgreSQL cannot divide an interval by another interval, "
+                "and cannot cast an interval to numeric or integer. "
+                "timestamp - timestamp produces an INTERVAL — to convert to days you must use: "
+                "EXTRACT(EPOCH FROM (end_ts - start_ts)) / 86400 "
+                "(EXTRACT returns seconds; dividing by 86400 gives fractional days). "
+                "NEVER write (ts - ts)::numeric, (ts - ts)::integer, "
+                "or (ts - ts)::interval / INTERVAL '1 day' — all will fail. "
+                "Correct pattern: EXTRACT(EPOCH FROM NULLIF(col_a, '')::timestamp "
+                "- NULLIF(col_b, '')::timestamp) / 86400"
+            )
+
+        # interval cannot be cast to numeric/integer (separate from above in case
+        # the word "interval" doesn't appear in the operator-does-not-exist message)
+        if ("cannot cast type interval" in e or "cannot coerce" in e and "interval" in e
+                or ("coerce" in e and "interval" in e)):
+            return (
+                "DIAGNOSIS: An interval (the result of subtracting two timestamps) "
+                "cannot be cast directly to numeric or integer. "
+                "FIX: Replace `(ts2 - ts1)::numeric / 86400` with "
+                "`EXTRACT(EPOCH FROM (ts2 - ts1)) / 86400`. "
+                "EXTRACT returns the duration as seconds; dividing by 86400 gives days."
+            )
+
         # Specific explicit-cast failure before generic syntax fallback
         if ("cannot cast type" in e or "cannot be cast" in e or
                 ("cast" in e and "does not exist" in e)):

@@ -519,6 +519,73 @@ def _normalise(name: str) -> str:
     return re.sub(r"[\s_]+", "", name.lower())
 
 
+def _pg_rewrite_interval_to_days(sql: str) -> str:
+    """Rewrite incorrect interval arithmetic to EXTRACT(EPOCH FROM ...) / 86400.
+
+    ``timestamp - timestamp`` in PostgreSQL yields an ``interval``.  The LLM
+    commonly tries two broken patterns to turn that into a number of days:
+
+    * ``expr::numeric / 86400``            — interval cannot be cast to numeric
+    * ``expr::interval / INTERVAL '1 day'``— interval / interval unsupported
+
+    Both are rewritten to ``EXTRACT(EPOCH FROM expr) / 86400``, which extracts
+    the interval as seconds and divides by 86400 to give fractional days.
+
+    Uses balanced-parenthesis matching to find the exact expression boundary,
+    so nested NULLIF / COALESCE calls are handled correctly.
+    """
+
+    def _find_open_paren(s: str, close_idx: int) -> int:
+        """Return the index of the '(' that balances the ')' at close_idx."""
+        depth = 0
+        for i in range(close_idx, -1, -1):
+            if s[i] == ')':
+                depth += 1
+            elif s[i] == '(':
+                depth -= 1
+                if depth == 0:
+                    return i
+        return -1  # unbalanced — leave SQL untouched
+
+    # Suffix patterns that follow a closing ')' and indicate misused intervals
+    _INTERVAL_SUFFIX = re.compile(
+        r'\)::(?:numeric|integer|float\d*|double\s+precision)\s*/\s*86400'
+        r'|'
+        r"\)::interval\s*/\s*INTERVAL\s*'1\s+days?'",
+        re.IGNORECASE,
+    )
+
+    out: list[str] = []
+    pos = 0
+
+    for m in _INTERVAL_SUFFIX.finditer(sql):
+        close_pos = m.start()               # index of the ')' before ::numeric etc.
+        open_pos  = _find_open_paren(sql, close_pos)
+        if open_pos < 0:
+            continue                         # unbalanced — skip
+
+        inner = sql[open_pos + 1: close_pos]
+
+        # Only rewrite when the expression contains a timestamp subtraction
+        il = inner.lower()
+        if '::timestamp' not in il and '::date' not in il:
+            continue
+
+        # Walk back from open_pos to include any function keyword (e.g. NULLIF)
+        func_start = open_pos
+        while func_start > 0 and (sql[func_start - 1].isalnum() or sql[func_start - 1] == '_'):
+            func_start -= 1
+
+        full_expr = sql[func_start: close_pos + 1]   # e.g. NULLIF(inner_expr)
+
+        out.append(sql[pos: func_start])
+        out.append(f'EXTRACT(EPOCH FROM {full_expr}) / 86400')
+        pos = m.end()
+
+    out.append(sql[pos:])
+    return ''.join(out)
+
+
 def _pg_fix_timestamp_casts(sql: str) -> str:
     """Rewrite unsafe timestamp/date casts for PostgreSQL.
 
@@ -532,7 +599,7 @@ def _pg_fix_timestamp_casts(sql: str) -> str:
         col::TIMESTAMP                →  NULLIF(col, '')::TIMESTAMP
         alias.col::TIMESTAMP          →  NULLIF(alias.col, '')::TIMESTAMP
 
-    The third form is the critical fix: the previous regex ``(\w+)::TYPE`` only
+    The third form is the critical fix: the previous regex ``(word+)::TYPE`` only
     captured the bare column name and left the ``alias.`` prefix outside the
     match, producing ``alias.NULLIF(col, '')::TYPE`` — which PostgreSQL reads as
     a schema-qualified function call and raises InvalidSchemaName.
@@ -580,6 +647,19 @@ def _pg_fix_timestamp_casts(sql: str) -> str:
         _replace_bare,
         sql, flags=re.IGNORECASE,
     )
+
+    # 3. Rewrite interval-to-days patterns that the LLM commonly gets wrong.
+    #
+    # timestamp - timestamp  →  interval  (PostgreSQL type system)
+    #
+    # Two broken forms the LLM emits:
+    #   a) expr::numeric / 86400          — interval cannot be cast to numeric
+    #   b) expr::interval / INTERVAL '1 day' — interval / interval unsupported
+    #
+    # Both are rewritten to: EXTRACT(EPOCH FROM expr) / 86400
+    # which extracts seconds from the interval and converts to fractional days.
+    sql = _pg_rewrite_interval_to_days(sql)
+
     return sql
 
 
