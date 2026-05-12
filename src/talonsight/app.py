@@ -743,7 +743,67 @@ def _render_result(r: QueryResult, elapsed: float | None = None):
                 st.code(r.sql, language="sql")
         return
 
-    if r.auto_corrected:
+    # ── Agent mode result layout ──────────────────────────────────────
+    if r.agent_steps is not None:
+        # Plan (if captured)
+        if r.agent_plan:
+            with st.expander("🗺 Investigation plan", expanded=False):
+                for i, step in enumerate(r.agent_plan, 1):
+                    st.markdown(f"{i}. {step}")
+
+        # Narrative — shown prominently above everything else
+        if r.summary:
+            st.markdown(
+                f'<div style="background:rgba(99,102,241,0.08);border-left:3px solid #6366f1;'
+                f'padding:12px 16px;border-radius:6px;margin-bottom:12px;">'
+                f'<div style="font-size:0.75rem;font-weight:600;color:#6366f1;'
+                f'text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">📝 Finding</div>'
+                f'<div style="font-size:0.95rem;line-height:1.6;">{_clean_summary(r.summary)}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        if elapsed is not None:
+            st.markdown(
+                f'<div style="font-size:0.82rem;color:#a4a4ad;margin:4px 0 12px;">'
+                f'🧠 Agent · {len(r.agent_steps)} steps · ⏱ {elapsed:.1f}s</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Agent trace (collapsed by default)
+        if r.agent_steps:
+            total_ms = sum(s.elapsed_ms for s in r.agent_steps)
+            with st.expander(
+                f"🔍 Agent trace — {len(r.agent_steps)} steps · {total_ms/1000:.1f}s",
+                expanded=False,
+            ):
+                for step in r.agent_steps:
+                    icon = "✓" if not step.error else "✗"
+                    elapsed_fmt = (
+                        f"{step.elapsed_ms/1000:.1f}s"
+                        if step.elapsed_ms >= 1000
+                        else f"{step.elapsed_ms}ms"
+                    )
+                    st.markdown(
+                        f"**Step {step.step_num} · `{step.tool_name}`** · {elapsed_fmt} {icon}"
+                    )
+                    if step.tool_name == "run_sql" and step.tool_input.get("sql"):
+                        st.code(step.tool_input["sql"], language="sql")
+                    elif step.tool_name == "create_plan" and step.tool_input.get("steps"):
+                        for i, s in enumerate(step.tool_input["steps"], 1):
+                            st.caption(f"{i}. {s}")
+                    elif step.tool_name not in ("final_answer",) and step.tool_output:
+                        st.text(step.tool_output[:400])
+                    if step.error:
+                        st.error(step.error)
+
+        # SQL used (agent mode)
+        if r.sql:
+            with st.expander("🔍 SQL used", expanded=False):
+                st.code(r.sql, language="sql")
+
+    # ── Classic mode decorations (skipped in agent mode) ─────────────
+    if r.agent_steps is None and r.auto_corrected:
         with st.expander("✅ Query had an issue that was automatically corrected", expanded=False):
             if r.correction_explanation:
                 st.caption(r.correction_explanation)
@@ -756,35 +816,36 @@ def _render_result(r: QueryResult, elapsed: float | None = None):
             st.markdown("**Corrected SQL (used):**")
             st.code(r.sql, language="sql")
 
-    if r.column_warnings:
+    if r.agent_steps is None and r.column_warnings:
         for w in r.column_warnings:
             st.markdown(f'<div class="col-warning">{w}</div>', unsafe_allow_html=True)
 
-    if r.summary:
+    if r.agent_steps is None and r.summary:
         st.markdown(_clean_summary(r.summary))
 
-    with st.expander("🔍 Generated SQL", expanded=False):
-        if r.safety.level == RiskLevel.SAFE:
-            badge = '<span class="badge-safe">✓ Safe</span>'
-        elif r.safety.level == RiskLevel.SUSPICIOUS:
-            badge = f'<span class="badge-warn">⚠ {r.safety.reason}</span>'
-        else:
-            badge = f'<span class="badge-blocked">✕ Blocked: {r.safety.reason}</span>'
-        st.markdown(badge, unsafe_allow_html=True)
-        st.code(r.sql, language="sql")
-        if r.explanation:
-            st.caption(r.explanation)
-        if r.kb_patterns_used > 0:
+    if r.agent_steps is None:
+        with st.expander("🔍 Generated SQL", expanded=False):
+            if r.safety.level == RiskLevel.SAFE:
+                badge = '<span class="badge-safe">✓ Safe</span>'
+            elif r.safety.level == RiskLevel.SUSPICIOUS:
+                badge = f'<span class="badge-warn">⚠ {r.safety.reason}</span>'
+            else:
+                badge = f'<span class="badge-blocked">✕ Blocked: {r.safety.reason}</span>'
+            st.markdown(badge, unsafe_allow_html=True)
+            st.code(r.sql, language="sql")
+            if r.explanation:
+                st.caption(r.explanation)
+            if r.kb_patterns_used > 0:
+                st.markdown(
+                    f'<div class="kb-indicator">📖 {r.kb_patterns_used} KB pattern{"s" if r.kb_patterns_used != 1 else ""} guided this query</div>',
+                    unsafe_allow_html=True,
+                )
+
+        if elapsed is not None:
             st.markdown(
-                f'<div class="kb-indicator">📖 {r.kb_patterns_used} KB pattern{"s" if r.kb_patterns_used != 1 else ""} guided this query</div>',
+                f'<div style="font-size:0.82rem;color:#a4a4ad;margin:4px 0 12px;font-weight:500;letter-spacing:0.01em;">⏱ {elapsed:.1f}s</div>',
                 unsafe_allow_html=True,
             )
-
-    if elapsed is not None:
-        st.markdown(
-            f'<div style="font-size:0.82rem;color:#a4a4ad;margin:4px 0 12px;font-weight:500;letter-spacing:0.01em;">⏱ {elapsed:.1f}s</div>',
-            unsafe_allow_html=True,
-        )
 
     if r.data is not None and len(r.data) > 0:
         df = r.data
@@ -1324,7 +1385,39 @@ with st.sidebar:
                 "Switch to **Ollama** for semantic embeddings via `nomic-embed-text`."
             )
 
-    # ── 6. KNOWLEDGE BASE ─────────────────────────────────────────────
+    # ── 6. AGENT MODE ────────────────────────────────────────────────
+    with st.expander("🧠 Agent Mode", expanded=False):
+        st.toggle(
+            "Enable Agent Mode",
+            key="_sb_agent_mode",
+            value=False,
+            help=(
+                "Agent mode runs a multi-step autonomous investigation instead of "
+                "a single SQL query. The agent plans, explores the schema, executes "
+                "iterative queries, and synthesises a narrative answer.\n\n"
+                "⚡ Recommended models: hermes3, llama3.1, qwen2.5\n"
+                "📥 Install: ollama pull hermes3"
+            ),
+        )
+        if st.session_state.get("_sb_agent_mode"):
+            st.caption(
+                "🧠 **Agent mode active** — each question triggers a full investigation "
+                "(5–12 tool calls, ~30–60s on 8B models).  \n"
+                "Recommended: `ollama pull hermes3`"
+            )
+            st.slider(
+                "Max investigation steps",
+                min_value=6,
+                max_value=20,
+                value=12,
+                step=1,
+                key="_sb_agent_max_steps",
+                help="Hard cap on tool calls per investigation. Higher = more thorough, slower.",
+            )
+        else:
+            st.caption("Off — uses classic one-shot SQL generation.")
+
+    # ── 7. KNOWLEDGE BASE ─────────────────────────────────────────────
     with st.expander("📖 Knowledge Base", expanded=False):
         st.text_input(
             "Extra KB directory",
@@ -1608,22 +1701,60 @@ with tab_ask:
         st.session_state.messages.append({"role": "user", "content": question})
 
         _status = st.empty()
-        _status.markdown(
-            '<div style="color:#a4a4ad;font-size:0.85rem;">⏳ Thinking…</div>',
-            unsafe_allow_html=True,
-        )
+        _agent_mode = st.session_state.get("_sb_agent_mode", False)
 
-        def _on_attempt(attempt: int, total: int) -> None:
+        if _agent_mode:
+            # ── Agent mode — multi-step investigation ─────────────────
             _status.markdown(
-                f'<div style="color:#f0a800;font-size:0.85rem;">'
-                f'⚠️ Attempt {attempt}/{total} — refining query…</div>',
+                '<div style="color:#a4a4ad;font-size:0.85rem;">🧠 Planning investigation…</div>',
+                unsafe_allow_html=True,
+            )
+            _trace_placeholder = st.empty()
+            _step_lines: list[str] = []
+
+            def _on_agent_step(step) -> None:
+                icon = "✓" if not step.error else "✗"
+                elapsed_s = f"{step.elapsed_ms/1000:.1f}s" if step.elapsed_ms >= 1000 else f"{step.elapsed_ms}ms"
+                _step_lines.append(
+                    f"Step {step.step_num} &nbsp;·&nbsp; `{step.tool_name}` &nbsp;·&nbsp; "
+                    f"{elapsed_s} &nbsp; {icon}"
+                )
+                _trace_placeholder.markdown(
+                    '<div style="color:#a4a4ad;font-size:0.82rem;line-height:1.7">'
+                    + "<br>".join(_step_lines)
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            _t0 = time.perf_counter()
+            _max_steps = st.session_state.get("_sb_agent_max_steps", 12)
+            result = chat_engine.ask_agent(
+                question,
+                on_step=_on_agent_step,
+                max_steps=_max_steps,
+            )
+            _elapsed = time.perf_counter() - _t0
+            _status.empty()
+            _trace_placeholder.empty()
+
+        else:
+            # ── Classic mode — one-shot SQL generation ─────────────────
+            _status.markdown(
+                '<div style="color:#a4a4ad;font-size:0.85rem;">⏳ Thinking…</div>',
                 unsafe_allow_html=True,
             )
 
-        _t0 = time.perf_counter()
-        result = chat_engine.ask(question, on_attempt=_on_attempt)
-        _elapsed = time.perf_counter() - _t0
-        _status.empty()
+            def _on_attempt(attempt: int, total: int) -> None:
+                _status.markdown(
+                    f'<div style="color:#f0a800;font-size:0.85rem;">'
+                    f'⚠️ Attempt {attempt}/{total} — refining query…</div>',
+                    unsafe_allow_html=True,
+                )
+
+            _t0 = time.perf_counter()
+            result = chat_engine.ask(question, on_attempt=_on_attempt)
+            _elapsed = time.perf_counter() - _t0
+            _status.empty()
 
         st.session_state.messages.append({
             "role": "assistant",

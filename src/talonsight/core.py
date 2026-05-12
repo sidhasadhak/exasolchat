@@ -51,6 +51,9 @@ class QueryResult:
     original_sql: Optional[str] = None      # the SQL that first failed
     original_error: Optional[str] = None    # the error from the first attempt
     correction_explanation: Optional[str] = None  # what the LLM says it fixed
+    # Agent fields — populated when ask_agent() is used; None in classic mode
+    agent_steps: Optional[list] = None      # list[AgentStep]
+    agent_plan: Optional[list] = None       # list[str] from create_plan step
 
     def __post_init__(self):
         if self.column_warnings is None:
@@ -169,6 +172,11 @@ class TalonSight:
 
         # Visual query builder — exposes schema introspection to the UI
         self.builder = QueryBuilder(self.schema_context)
+
+        # Business model — persists confirmed findings across sessions
+        from talonsight.memory import BusinessModel
+        _conn_id = f"{self._config.db_type}_{self._config.database or 'default'}"
+        self.business_model = BusinessModel(_conn_id)
 
         self._history: list[QueryResult] = []
 
@@ -416,6 +424,75 @@ class TalonSight:
             return questions
         except Exception:
             return []
+
+    # ── Agent mode ────────────────────────────────────────────────────
+
+    def ask_agent(
+        self,
+        question: str,
+        on_step=None,
+        max_steps: int = 12,
+    ) -> QueryResult:
+        """Run a multi-step agentic investigation for a natural-language question.
+
+        The agent calls tools (schema lookup, SQL execution, KB search, etc.)
+        iteratively until it reaches a confident answer, then synthesises a
+        plain-English narrative alongside the key SQL and chart hint.
+
+        Args:
+            question:   Natural-language business question.
+            on_step:    Optional callback(AgentStep) called after each tool call.
+                        Useful for streaming live progress to the Streamlit UI.
+            max_steps:  Hard cap on total tool calls (default 12).
+
+        Returns:
+            QueryResult with agent_steps, agent_plan, and summary = narrative.
+        """
+        from talonsight.agent import AgentLoop
+
+        loop = AgentLoop(
+            connector=self._db,
+            schema_context=self.schema_context,
+            llm=self.llm,
+            business_model=self.business_model,
+            kb=self.kb,
+            dialect=getattr(self.schema_context, "dialect", ""),
+            allowed_schemas=list(self._allowed_schemas) if self._allowed_schemas else [],
+            allowed_tables=list(self._allowed_tables) if self._allowed_tables else [],
+            max_steps=max_steps,
+        )
+
+        ar = loop.run_sync(question, on_step=on_step)
+
+        # Build chart from hint + data
+        chart_config = None
+        chart_obj = None
+        if ar.data is not None and not ar.data.empty and ar.chart_hint:
+            try:
+                chart_config = {
+                    "chart_type": ar.chart_hint,
+                    "title": question[:80],
+                    "x": ar.data.columns[0] if len(ar.data.columns) > 0 else None,
+                    "y": ar.data.columns[1] if len(ar.data.columns) > 1 else None,
+                }
+                chart_obj = auto_chart(ar.data, chart_config, self.chart_library)
+            except Exception:
+                pass
+
+        result = QueryResult(
+            question=question,
+            sql=ar.sql or "",
+            safety=SafetyVerdict(RiskLevel.SAFE, ar.sql or "", "agent"),
+            data=ar.data,
+            summary=ar.narrative,
+            chart_config=chart_config,
+            chart_obj=chart_obj,
+            error=ar.error,
+            agent_steps=ar.steps,
+            agent_plan=ar.plan,
+        )
+        self._history.append(result)
+        return result
 
     # ── Schema fingerprint + question cache ───────────────────────────
 

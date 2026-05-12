@@ -30,12 +30,54 @@ class LLMResponse:
     raw: str
 
 
+@dataclass
+class ToolResponse:
+    """Response from chat_with_tools() — either tool calls or a plain text reply.
+
+    tool_calls items are normalised across backends:
+        {"name": str, "arguments": dict, "id": str | None}
+
+    raw_assistant_msg is the verbatim assistant message from the API response.
+    Append it directly to the message history before adding tool-result messages.
+    """
+    content: str             # non-empty when model replies with text (no tool calls)
+    tool_calls: list[dict]   # normalised tool calls
+    raw_assistant_msg: dict  # verbatim — append to history as-is
+
+
 class LLMBackend(ABC):
     """Abstract LLM backend."""
 
     def ping(self) -> tuple[bool, str]:
         """Return (reachable, message). Override in each backend."""
         return False, "ping not implemented"
+
+    def supports_tool_calling(self) -> tuple[bool, str]:
+        """Return (supported, message). Override in backends that can detect this."""
+        return True, ""
+
+    def build_tool_result_msg(self, tool_call: dict, result: str) -> dict:
+        """Build the tool-result message to append after executing a tool call.
+
+        Ollama needs no tool_call_id; OpenAI-compatible backends do.
+        Subclasses override when the backend requires tool_call_id.
+        """
+        return {"role": "tool", "content": str(result)}
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> "ToolResponse":
+        """Multi-turn conversation with tool-calling support.
+
+        Subclasses must override this to support agent mode.
+        Default raises NotImplementedError so classic mode still works fine.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement chat_with_tools(). "
+            "Agent mode requires an Ollama or OpenAI-compatible backend."
+        )
 
     @abstractmethod
     def generate_sql(
@@ -633,6 +675,88 @@ class OllamaBackend(LLMBackend):
         raw = self._chat(self._build_explore_prompt(schema_prompt, profile), 0.4)
         return self._extract_json_list(raw)
 
+    # ── Agent / tool-calling ──────────────────────────────────────────
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> ToolResponse:
+        """Multi-turn chat with tool-calling via Ollama /api/chat."""
+        try:
+            resp = self._client.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": tools,
+                    "stream": False,
+                },
+            )
+            resp.raise_for_status()
+            msg = resp.json()["message"]
+        except httpx.ConnectError:
+            raise ConnectionError(
+                f"Ollama server not reachable at {self.base_url}.\n"
+                f"Start it with:  ollama serve\n"
+                f"Then ensure the model is pulled:  ollama pull {self.model}"
+            )
+
+        raw_calls = msg.get("tool_calls") or []
+        normalised = []
+        for tc in raw_calls:
+            fn = tc.get("function", {})
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            normalised.append({
+                "name": fn.get("name", ""),
+                "arguments": args,
+                "id": None,  # Ollama does not use tool_call_id
+            })
+
+        return ToolResponse(
+            content=msg.get("content") or "",
+            tool_calls=normalised,
+            raw_assistant_msg=msg,
+        )
+
+    def supports_tool_calling(self) -> tuple[bool, str]:
+        """Probe the model with a minimal tool schema to verify support."""
+        _probe_tool = [{
+            "type": "function",
+            "function": {
+                "name": "probe",
+                "description": "Connectivity probe — ignore.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }]
+        try:
+            resp = self._client.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "tools": _probe_tool,
+                    "stream": False,
+                },
+                timeout=httpx.Timeout(10.0),
+            )
+            resp.raise_for_status()
+            return True, f"{self.model} supports tool calling"
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(k in msg for k in ("does not support", "tool", "function")):
+                return (
+                    False,
+                    f"{self.model} does not support tool calling. "
+                    "Recommended models: hermes3, llama3.1, qwen2.5",
+                )
+            return False, f"Could not verify tool calling support: {exc}"
+
 
 class OpenAICompatibleBackend(LLMBackend):
     """Any OpenAI-compatible API (LM Studio, vLLM, text-gen-webui, LocalAI, etc.)."""
@@ -710,6 +834,62 @@ class OpenAICompatibleBackend(LLMBackend):
     def generate_explore_questions(self, schema_prompt: str, profile: str) -> list[str]:
         raw = self._chat(self._build_explore_prompt(schema_prompt, profile), 0.4)
         return self._extract_json_list(raw)
+
+    # ── Agent / tool-calling ──────────────────────────────────────────
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> ToolResponse:
+        """Multi-turn chat with tool-calling via OpenAI-compatible /chat/completions."""
+        try:
+            resp = self._client.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                },
+            )
+            resp.raise_for_status()
+            msg = resp.json()["choices"][0]["message"]
+        except httpx.ConnectError:
+            raise ConnectionError(
+                f"{self._backend_name} server not reachable at {self.base_url}.\n"
+                "Make sure the server is running and the URL is correct."
+            )
+
+        raw_calls = msg.get("tool_calls") or []
+        normalised = []
+        for tc in raw_calls:
+            fn = tc.get("function", {})
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            normalised.append({
+                "name": fn.get("name", ""),
+                "arguments": args,
+                "id": tc.get("id"),  # OpenAI always provides tool_call_id
+            })
+
+        return ToolResponse(
+            content=msg.get("content") or "",
+            tool_calls=normalised,
+            raw_assistant_msg=msg,
+        )
+
+    def build_tool_result_msg(self, tool_call: dict, result: str) -> dict:
+        """OpenAI-compatible backends require tool_call_id on tool-result messages."""
+        msg: dict = {"role": "tool", "content": str(result)}
+        if tool_call.get("id"):
+            msg["tool_call_id"] = tool_call["id"]
+        return msg
 
 
 class MLXBackend(OpenAICompatibleBackend):
