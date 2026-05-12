@@ -324,9 +324,12 @@ class TalonSight:
                     self._history.append(result)
                     return result
 
-                # Ask the LLM to diagnose and fix the SQL
+                # Ask the LLM to diagnose and fix the SQL — provide schema so
+                # the LLM can verify table/column names when fixing references.
                 try:
-                    fix_resp = self.llm.fix_sql(question, current_sql, err_str)
+                    fix_resp = self.llm.fix_sql(
+                        question, current_sql, err_str, schema=schema_prompt
+                    )
                     fixed_sql = sanitize_sql(fix_resp.sql)
 
                     # Re-validate safety before running the fixed SQL

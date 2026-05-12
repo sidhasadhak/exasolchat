@@ -230,8 +230,83 @@ Respond with ONLY a JSON object (no markdown fences, no explanation):
 }}
 Use "table_only" if the data isn't well-suited for charting (e.g., single row, text-heavy)."""
 
-    def _build_fix_prompt(self, question: str, failed_sql: str, error: str) -> str:
-        return f"""You are a SQL expert. A SQL query failed with an error. Diagnose the problem and return a corrected query.
+    @staticmethod
+    def _classify_sql_error(error: str) -> str:
+        """Return a targeted diagnostic hint based on the database error message.
+
+        These hints are injected into the fix prompt so the LLM knows exactly
+        what class of fix is needed without having to infer it from the raw
+        error string (which varies across databases).
+        """
+        e = error.lower()
+
+        # PostgreSQL: alias mistaken for a schema name — common when LLM writes
+        # alias.FUNCTION(col) instead of FUNCTION(alias.col)
+        if "schema" in e and "does not exist" in e:
+            return (
+                "DIAGNOSIS: A table alias is being interpreted as a PostgreSQL schema name. "
+                "This happens when a function call is prefixed with a table alias, e.g. "
+                "`alias.NULLIF(col, '')` — SQL parsers read `alias` as a schema, not an alias. "
+                "FIX: Move the alias inside the function argument: `NULLIF(alias.col, '')`."
+            )
+
+        if ("column" in e or "field" in e) and "does not exist" in e:
+            return (
+                "DIAGNOSIS: A column referenced in the query does not exist. "
+                "Cross-check every column name against the DATABASE SCHEMA provided. "
+                "Check for typos, wrong table alias, or a column that belongs to a different table."
+            )
+
+        if ("relation" in e or "table" in e) and "does not exist" in e:
+            return (
+                "DIAGNOSIS: A table or view name is wrong. "
+                "Use only table names that appear in the DATABASE SCHEMA provided. "
+                "Check capitalisation and schema prefix."
+            )
+
+        if "ambiguous" in e and "column" in e:
+            return (
+                "DIAGNOSIS: A column name is ambiguous — it exists in more than one joined table. "
+                "FIX: Qualify every ambiguous column with its table alias (e.g. `t.column_name`)."
+            )
+
+        if "syntax error" in e or "parse error" in e:
+            return (
+                "DIAGNOSIS: SQL syntax error. "
+                "Check for: unbalanced parentheses, missing commas, keywords used as identifiers "
+                "(quote them), or function calls written as `alias.FUNCTION()` instead of `FUNCTION(alias.col)`."
+            )
+
+        if "invalid input syntax" in e or "invalid datetime" in e or "cannot cast" in e or "type" in e:
+            return (
+                "DIAGNOSIS: A type conversion or cast is failing. "
+                "FIX: Wrap the value with NULLIF(col, '') before casting to avoid empty-string errors, "
+                "or use TRY_CAST / TRY_TO_DATE where the dialect supports it."
+            )
+
+        if "divide by zero" in e or "division by zero" in e:
+            return (
+                "DIAGNOSIS: Division by zero. "
+                "FIX: Wrap the denominator with NULLIF(denominator, 0) to return NULL instead of erroring."
+            )
+
+        return ""  # no specific hint — let the LLM reason from the raw error
+
+    def _build_fix_prompt(
+        self,
+        question: str,
+        failed_sql: str,
+        error: str,
+        schema: str = "",
+    ) -> str:
+        hint = self._classify_sql_error(error)
+        hint_block = f"\n{hint}\n" if hint else ""
+        schema_block = (
+            f"\nDATABASE SCHEMA (authoritative — use only tables/columns listed here):\n"
+            f"{schema}\n"
+            if schema else ""
+        )
+        return f"""You are a SQL expert. A query failed. Diagnose the root cause and return a corrected query.
 
 ORIGINAL QUESTION: {question}
 
@@ -242,23 +317,29 @@ FAILED SQL:
 
 ERROR MESSAGE:
 {error}
-
+{hint_block}{schema_block}
 RULES:
 - Return ONLY a SELECT query. No INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, or DDL.
-- Fix the exact error described. Do not change the intent of the query.
+- Fix the exact error. Do not change the intent or structure of the query beyond what is necessary.
 - Return corrected SQL inside a ```sql code block.
-- After the SQL, write 1 sentence explaining what was wrong and what you fixed.
-- If the error is about a missing column, check if you used the wrong column name or alias.
-- If the error is about a type mismatch, add the appropriate CAST.
-- If the error is about an ambiguous column, qualify it with the table name or alias.
-- Do NOT invent columns or tables that are not in the original query."""
+- After the SQL block, write ONE sentence explaining what was wrong and what you changed.
+- Do NOT invent columns or tables that are not in the schema or original query."""
 
-    def fix_sql(self, question: str, failed_sql: str, error: str) -> "LLMResponse":
+    def fix_sql(
+        self,
+        question: str,
+        failed_sql: str,
+        error: str,
+        schema: str = "",
+    ) -> "LLMResponse":
         """Ask the LLM to diagnose and fix a failed SQL query.
+
+        Pass ``schema`` (the full schema prompt string) so the LLM can verify
+        table and column names when fixing reference errors.
 
         Subclasses inherit this — they only need to implement _chat().
         """
-        prompt = self._build_fix_prompt(question, failed_sql, error)
+        prompt = self._build_fix_prompt(question, failed_sql, error, schema=schema)
         raw = self._chat(prompt, temperature=0.0)
         sql = self._extract_sql(raw)
         explanation = raw.split("```")[-1].strip() if "```" in raw else raw.strip()
