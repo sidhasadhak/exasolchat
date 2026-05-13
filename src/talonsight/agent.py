@@ -339,6 +339,7 @@ class AgentLoop:
 
         # Investigation state — reset on each run()
         self._tried_sql: set[str] = set()
+        self._has_result: bool = False
         self._done: bool = False
         self._plan: list[str] = []
         self._final_narrative: str = ""
@@ -494,8 +495,23 @@ class AgentLoop:
     def _tool_create_plan(self, args: dict) -> str:
         steps = args.get("steps", [])
         if not isinstance(steps, list):
-            steps = [str(steps)]
-        self._plan = [str(s) for s in steps]
+            steps = [steps]
+
+        clean: list[str] = []
+        for s in steps:
+            # Step might be a dict {"step": "..."} or {"description": "..."}
+            if isinstance(s, dict):
+                text = (s.get("step") or s.get("description") or
+                        s.get("action") or s.get("text") or str(s))
+            else:
+                text = str(s)
+            # Strip leading numbering like "1. " or "Step 1: "
+            text = re.sub(r'^\s*(?:step\s*)?\d+[\.\):\-]\s*', '', text, flags=re.I)
+            text = text.strip()
+            if text:
+                clean.append(text)
+
+        self._plan = clean
         numbered = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(self._plan))
         return f"Plan recorded ({len(self._plan)} steps):\n{numbered}"
 
@@ -647,6 +663,14 @@ class AgentLoop:
         if not sql:
             return "sql argument is required."
 
+        # Hard stop — if we already have a successful result, don't run more SQL.
+        # The model must call final_answer with what it already has.
+        if self._has_result:
+            return (
+                "⛔ STOP: You already retrieved data successfully in a previous step. "
+                "Do NOT run more SQL. Call final_answer RIGHT NOW using the data you already have."
+            )
+
         # Dedup guard — if this exact SQL was already tried, refuse to repeat it
         sql_key = re.sub(r'\s+', ' ', sql.lower())
         if sql_key in self._tried_sql:
@@ -684,12 +708,18 @@ class AgentLoop:
             # Store for Option A — last successful result is the agent's main answer
             self._last_sql = args.get("sql", sql)  # store the original (no injected LIMIT)
             self._last_df = df
+            self._has_result = True  # prevents any further run_sql calls
 
             row_note = (
-                f"\n\n*Showing {len(df)} rows (LIMIT {limit} applied)*"
-                if len(df) >= limit else ""
+                f"\n\n*Showing {len(df)} of {len(df)} rows*"
+                if len(df) < limit else
+                f"\n\n*Showing {limit} rows (limited)*"
             )
-            return df.to_markdown(index=False) + row_note
+            directive = (
+                "\n\n✅ QUERY SUCCESSFUL — you have your answer. "
+                "Call final_answer NOW with a 2-4 sentence narrative. Do not run more SQL."
+            )
+            return df.to_markdown(index=False) + row_note + directive
 
         except Exception as exc:
             return f"SQL ERROR: {exc}\n\nFailed SQL:\n{sql}"
@@ -784,6 +814,7 @@ RULES:
         self._last_sql = None
         self._last_df = None
         self._tried_sql: set[str] = set()   # dedup guard for run_sql
+        self._has_result: bool = False       # True after first successful run_sql
 
     def _resolve_table(self, name: str):
         """Find a TableInfo by bare name or schema-qualified name (case-insensitive)."""
