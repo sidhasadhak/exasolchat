@@ -32,9 +32,16 @@ import sys
 import time
 import threading
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
+import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+class HermesResult(NamedTuple):
+    answer: str
+    sql: str = ""
+    data: Optional[pd.DataFrame] = None
 
 # ── Config path discovery ─────────────────────────────────────────────────────
 # Hermes stores its config under ~/.hermes/ (per the official docs).
@@ -533,13 +540,24 @@ def _clean_sql(sql: str) -> Optional[str]:
     return None
 
 
-def _execute_sql_safe(sql: str) -> tuple[str, str]:
-    """Run sql via the MCP server; return (markdown_table, error_or_empty)."""
+def _execute_sql_safe(sql: str) -> tuple[str, str, Optional[pd.DataFrame]]:
+    """Run sql via the MCP server; return (markdown_table, error_or_empty, df_or_None)."""
     try:
-        from talonsight.mcp_server import _run_sql
-        return _run_sql(sql), ""
+        from talonsight.mcp_server import _get_core
+        from talonsight.safety import validate_sql, RiskLevel
+        ts = _get_core()
+        verdict = validate_sql(sql)
+        if verdict.level == RiskLevel.BLOCKED:
+            return f"BLOCKED: {verdict.reason}", "", None
+        sql = sql.rstrip("; \n\t")
+        if not re.search(r'\bLIMIT\b', sql, re.IGNORECASE):
+            sql = sql + "\nLIMIT 200"
+        df = ts._db.execute_query(sql)
+        if df is None or df.empty:
+            return "Query returned no rows.", "", None
+        return df.to_markdown(index=False), "", df
     except Exception as exc:
-        return "", str(exc)
+        return "", str(exc), None
 
 
 def _ask_hermes_raw(prompt: str, timeout: int = 90) -> str:
@@ -560,10 +578,10 @@ def _ask_hermes_raw(prompt: str, timeout: int = 90) -> str:
 
 def _repair_and_execute(
     sql: str, error: str, schema_context: str, question: str
-) -> tuple[str, str]:
+) -> tuple[str, str, Optional[pd.DataFrame]]:
     """Ask the model to fix a failed SQL given the error message.
 
-    Returns (markdown_table, final_error).
+    Returns (markdown_table, final_error, df_or_None).
     """
     repair_prompt = (
         f"{schema_context}\n\n"
@@ -576,11 +594,11 @@ def _repair_and_execute(
     raw = _ask_hermes_raw(repair_prompt, timeout=90)
     fixed_sql = _extract_sql(raw) if raw else None
     if not fixed_sql:
-        return "", error
-    result, err2 = _execute_sql_safe(fixed_sql)
+        return "", error, None
+    result, err2, df2 = _execute_sql_safe(fixed_sql)
     if err2:
-        return "", err2
-    return result, ""
+        return "", err2, None
+    return result, "", df2
 
 
 def _build_enriched_prompt(
@@ -612,26 +630,52 @@ def _build_enriched_prompt(
         q_tokens = set(re.split(r'\W+', search_text.lower()))
         q_tokens.discard('')
 
+        # Build full table list from information_schema (all schemas)
+        try:
+            _df_all = ts._db.execute_query(
+                "SELECT table_schema, table_name, column_name "
+                "FROM information_schema.columns "
+                "WHERE table_schema NOT IN ('information_schema','pg_catalog') "
+                "ORDER BY table_name, ordinal_position"
+            )
+            _all_cols: dict[str, list[str]] = {}
+            _tbl_schema: dict[str, str] = {}
+            if _df_all is not None and not _df_all.empty:
+                for _, _r in _df_all.iterrows():
+                    _all_cols.setdefault(_r["table_name"], []).append(_r["column_name"])
+                    _tbl_schema[_r["table_name"]] = _r["table_schema"]
+        except Exception:
+            _all_cols = {t.name: [c.name for c in t.columns] for t in ts.schema_context.tables}
+            _tbl_schema = {t.name: "main" for t in ts.schema_context.tables}
+
         scores: list[tuple[int, str]] = []
-        for tbl in ts.schema_context.tables:
-            tbl_tokens = set(re.split(r'[_\W]+', tbl.name.lower()))
+        for tbl_name, col_names in _all_cols.items():
+            tbl_tokens = set(re.split(r'[_\W]+', tbl_name.lower()))
             col_tokens: set[str] = set()
-            for col in tbl.columns:
-                col_tokens.update(re.split(r'[_\W]+', col.name.lower()))
+            for col in col_names:
+                col_tokens.update(re.split(r'[_\W]+', col.lower()))
             score = len(q_tokens & (tbl_tokens | col_tokens))
-            scores.append((score, tbl.name))
+            scores.append((score, tbl_name))
 
         scores.sort(key=lambda x: (-x[0], x[1]))
 
-        if scores[0][0] == 0:
-            by_cols = sorted(ts.schema_context.tables, key=lambda t: len(t.columns), reverse=True)
-            chosen = [t.name for t in by_cols[:3]]
+        if not scores or scores[0][0] == 0:
+            chosen = [n for n, _ in sorted(_all_cols.items(), key=lambda x: -len(x[1]))[:3]]
         else:
             chosen = [name for score, name in scores[:3] if score > 0]
             if not chosen:
                 chosen = [scores[0][1]]
 
+        # Build qualified names for non-main tables so model references them correctly
+        _chosen_fqn = [
+            f"{_tbl_schema.get(n, 'main')}.{n}" if _tbl_schema.get(n, 'main') != 'main' else n
+            for n in chosen
+        ]
         schema = _get_schema(chosen)
+        # Prepend a note about qualified references if any non-main tables are included
+        _non_main = [fqn for fqn in _chosen_fqn if '.' in fqn]
+        if _non_main:
+            schema = f"NOTE: Non-default schema tables must be referenced with their schema prefix in SQL.\n" + schema
 
         # Build conversation context block for follow-up awareness
         conv_block = ""
@@ -684,21 +728,21 @@ def ask_hermes(
     output_cb: Optional[Callable[[str], None]] = None,
     timeout: int = 300,
     history: Optional[list[dict]] = None,
-) -> str:
+) -> HermesResult:
     """Run `hermes -z <question> -t talonsight` and return the final answer.
 
     hermes -z suppresses all output until the final answer is ready, so we
     emit synthetic timed progress ticks via output_cb to keep the UI alive.
     The talonsight MCP toolset gives Hermes access to the connected database.
 
-    Returns the agent's final answer as a string, or an error message.
+    Returns a HermesResult with answer, sql, and data fields.
     """
     def emit(msg: str) -> None:
         if output_cb and msg.strip():
             output_cb(msg.strip())
 
     if not is_installed():
-        return "❌ Hermes Agent is not installed. Please complete onboarding first."
+        return HermesResult(answer="❌ Hermes Agent is not installed. Please complete onboarding first.")
 
     emit("🧠 Analyst starting…")
 
@@ -715,7 +759,7 @@ def ask_hermes(
             bufsize=1,
         )
     except Exception as exc:
-        return f"❌ Could not launch Hermes: {exc}"
+        return HermesResult(answer=f"❌ Could not launch Hermes: {exc}")
 
     # ── Timed progress ticker ─────────────────────────────────────────────────
     # hermes -z redirects all internal output to /dev/null and only writes the
@@ -763,14 +807,14 @@ def ask_hermes(
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        return "❌ Analysis timed out after 5 minutes."
+        return HermesResult(answer="❌ Analysis timed out after 5 minutes.")
     finally:
         ticker.join(timeout=3)
         stderr_thread.join(timeout=3)
 
     if proc.returncode != 0:
         diag = "\n".join(stderr_lines[-5:]) if stderr_lines else "no details"
-        return f"❌ Hermes exited with code {proc.returncode}.\n{diag}"
+        return HermesResult(answer=f"❌ Hermes exited with code {proc.returncode}.\n{diag}")
 
     answer = "\n".join(output_lines).strip()
 
@@ -782,21 +826,23 @@ def ask_hermes(
         sql = _extract_sql(answer) if answer else None
         if sql:
             emit("⚙️  Executing SQL…")
-            table, err = _execute_sql_safe(sql)
+            table, err, _df = _execute_sql_safe(sql)
             if err:
                 # SQL had hallucinated columns / WHERE clauses — tell user
-                return (
-                    f"Generated SQL had an error: {err}\n\n"
-                    f"**SQL attempted:**\n```sql\n{sql}\n```"
+                return HermesResult(
+                    answer=(
+                        f"Generated SQL had an error: {err}\n\n"
+                        f"**SQL attempted:**\n```sql\n{sql}\n```"
+                    )
                 )
             if not table or table.strip() == "Query returned no rows.":
-                return f"The query returned no rows.\n\n```sql\n{sql}\n```"
+                return HermesResult(answer=f"The query returned no rows.\n\n```sql\n{sql}\n```")
 
             emit("✍️  Composing answer…")
             narration = _narrate_result(question, sql, table)
-            return narration
+            return HermesResult(answer=narration, sql=sql, data=_df)
 
-    return answer if answer else "No answer was returned."
+    return HermesResult(answer=answer) if answer else HermesResult(answer="No answer was returned.")
 
 
 def _narrate_result(question: str, sql: str, table: str) -> str:

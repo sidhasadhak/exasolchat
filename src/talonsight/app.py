@@ -32,7 +32,10 @@ from talonsight.preferences import Preferences
 
 load_dotenv()
 
-_DEFAULT_DUCKDB_PATH    = os.environ.get("EXACHAT_DUCKDB_PATH", "")
+_DEFAULT_DUCKDB_PATH    = os.environ.get(
+    "EXACHAT_DUCKDB_PATH",
+    "/Users/amitkamlapure/Documents/DWH/duckdb/duckdb"
+)
 _DEFAULT_KB_PATH        = os.environ.get("EXACHAT_KB_PATH", "")
 _DEFAULT_METRICS_PATH   = os.environ.get("EXACHAT_METRICS_PATH", "")
 
@@ -44,7 +47,7 @@ _DEFAULT_OLLAMA_URL   = (
 )
 _DEFAULT_OLLAMA_MODEL = (
     _prefs_early.llm_model if _prefs_early.llm_provider == "ollama"
-    else os.environ.get("EXACHAT_OLLAMA_MODEL", "qwen2.5-coder:7b")
+    else os.environ.get("EXACHAT_OLLAMA_MODEL", "gemma4:31b-cloud")
 )
 del _prefs_early
 
@@ -770,15 +773,32 @@ def _render_result(r: QueryResult, elapsed: float | None = None):
 
         # Narrative — shown prominently above everything else
         if r.summary:
-            st.markdown(
-                f'<div style="background:rgba(99,102,241,0.08);border-left:3px solid #6366f1;'
-                f'padding:12px 16px;border-radius:6px;margin-bottom:12px;">'
-                f'<div style="font-size:0.75rem;font-weight:600;color:#6366f1;'
-                f'text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">📝 Finding</div>'
-                f'<div style="font-size:0.95rem;line-height:1.6;">{_clean_summary(r.summary)}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            # Split prose from any embedded markdown table
+            _summary_lines = r.summary.splitlines()
+            _prose_lines, _table_lines = [], []
+            _in_table = False
+            for _ln in _summary_lines:
+                if _ln.strip().startswith("|"):
+                    _in_table = True
+                if _in_table:
+                    _table_lines.append(_ln)
+                else:
+                    _prose_lines.append(_ln)
+            _prose = "\n".join(_prose_lines).strip()
+            _table_md = "\n".join(_table_lines).strip()
+
+            if _prose:
+                st.markdown(
+                    f'<div style="background:rgba(99,102,241,0.08);border-left:3px solid #6366f1;'
+                    f'padding:12px 16px;border-radius:6px;margin-bottom:12px;">'
+                    f'<div style="font-size:0.75rem;font-weight:600;color:#6366f1;'
+                    f'text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">📝 Finding</div>'
+                    f'<div style="font-size:0.95rem;line-height:1.6;">{_clean_summary(_prose)}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            if _table_md:
+                st.markdown(_table_md)  # Streamlit renders markdown tables correctly here
 
         if elapsed is not None:
             _agent_label = (
@@ -1827,7 +1847,7 @@ with tab_ask:
 
         if _use_hermes:
             # ── Analyst mode — Hermes Agent via hermes -z ─────────────
-            from talonsight.hermes_bootstrap import ask_hermes
+            from talonsight.hermes_bootstrap import ask_hermes, HermesResult
             from talonsight.safety import RiskLevel, SafetyVerdict
 
             # Live progress log — stays visible until the answer arrives
@@ -1856,7 +1876,7 @@ with tab_ask:
                 unsafe_allow_html=True,
             )
             _t0 = time.perf_counter()
-            _hermes_answer = ask_hermes(
+            _hermes_result = ask_hermes(
                 question,
                 output_cb=_on_hermes_progress,
                 history=st.session_state.get("messages", []),
@@ -1867,9 +1887,10 @@ with tab_ask:
 
             result = QueryResult(
                 question=question,
-                sql="",
+                sql=_hermes_result.sql,
                 safety=SafetyVerdict(RiskLevel.SAFE, "", "hermes"),
-                summary=_hermes_answer,
+                data=_hermes_result.data,
+                summary=_hermes_result.answer,
                 agent_steps=[],   # non-None triggers agent layout in _render_result
             )
 
