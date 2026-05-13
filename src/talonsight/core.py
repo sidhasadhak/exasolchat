@@ -442,11 +442,15 @@ class TalonSight:
 
         Uses the already-introspected schema_context — no database calls.
         Called once per TalonSight session; result is cached in _agent_schema_cache.
+        Table names are fully-qualified (schema.table) when a schema is present,
+        matching exactly what must appear in SQL.
         """
         lines = ["DATABASE SCHEMA (all available tables and columns):"]
         for tbl in self.schema_context.tables:
+            # Use the same fully-qualified name the SQL must use
+            fqn = f"{tbl.schema}.{tbl.name}" if tbl.schema else tbl.name
             row_info = f" ({tbl.row_count:,} rows)" if tbl.row_count else ""
-            lines.append(f"\nTable: {tbl.name}{row_info}")
+            lines.append(f"\nTable: {fqn}{row_info}")
             for col in tbl.columns:
                 nullable = "" if col.nullable else "  NOT NULL"
                 lines.append(f"  {col.name}  {col.type}{nullable}")

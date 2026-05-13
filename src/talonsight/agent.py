@@ -335,6 +335,7 @@ class AgentLoop:
         self._schema_str = schema_str
 
         # Investigation state — reset on each run()
+        self._tried_sql: set[str] = set()
         self._done: bool = False
         self._plan: list[str] = []
         self._final_narrative: str = ""
@@ -534,23 +535,22 @@ class AgentLoop:
         if not table:
             return "table argument is required."
         try:
+            # Resolve table name against schema — handles schema-qualified names
+            # e.g. agent says "customer" but DB needs "ecommerce.customer"
+            tbl_info = self._resolve_table(table)
+            fqn = self._table_fqn(tbl_info) if tbl_info else table
+
             if columns:
                 cols_sql = ", ".join(f'"{c}"' for c in columns[:6])
+            elif tbl_info:
+                cols_sql = ", ".join(f'"{c.name}"' for c in tbl_info.columns[:6])
             else:
-                # pick first 6 columns from schema to avoid wide result sets
-                tbl_info = next(
-                    (t for t in self._schema.tables if t.name.lower() == table.lower()), None
-                )
-                if tbl_info:
-                    cols_sql = ", ".join(
-                        f'"{c.name}"' for c in tbl_info.columns[:6]
-                    )
-                else:
-                    cols_sql = "*"
-            sql = f'SELECT {cols_sql} FROM "{table}" LIMIT {n}'
+                cols_sql = "*"
+
+            sql = f"SELECT {cols_sql} FROM {fqn} LIMIT {n}"
             df = self._connector.execute_query(sql)
             if df is None or df.empty:
-                return f"No rows returned from {table}."
+                return f"No rows returned from {fqn}."
             return df.to_markdown(index=False)
         except Exception as exc:
             return f"Could not sample {table}: {exc}"
@@ -636,6 +636,16 @@ class AgentLoop:
 
         if not sql:
             return "sql argument is required."
+
+        # Dedup guard — if this exact SQL was already tried, refuse to repeat it
+        sql_key = re.sub(r'\s+', ' ', sql.lower())
+        if sql_key in self._tried_sql:
+            return (
+                "DUPLICATE: This exact SQL was already tried. "
+                "If it succeeded, call final_answer now. "
+                "If it failed, fix the SQL before retrying."
+            )
+        self._tried_sql.add(sql_key)
 
         # Safety check
         from talonsight.safety import validate_sql, RiskLevel
@@ -743,10 +753,15 @@ STEPS:
 1. Call create_plan with your investigation steps first.
 2. {schema_instruction}
 3. Call get_sample_data before filtering on text/category columns to understand value formats.
-4. Call run_sql to execute queries — read errors and retry on failure.
-5. Call final_answer with a 2-4 sentence plain-English narrative when done.
+4. Call run_sql to execute queries — read errors and retry with a corrected query.
+5. As soon as run_sql returns a result table (not an error), call final_answer immediately.
 
-RULES: Only SELECT in run_sql. Max {self._max_steps} tool calls. Use only real table/column names."""
+RULES:
+- Only SELECT in run_sql.
+- Max {self._max_steps} tool calls total — be efficient.
+- Use table names EXACTLY as shown in the schema above (schema.table format when listed that way).
+- Never retry the exact same SQL twice — if it failed, fix it before retrying.
+- Do NOT keep looping after you have data. One successful run_sql → final_answer."""
 
     # ── Helpers ───────────────────────────────────────────────────────
 
@@ -757,6 +772,23 @@ RULES: Only SELECT in run_sql. Max {self._max_steps} tool calls. Use only real t
         self._final_chart_hint = None
         self._last_sql = None
         self._last_df = None
+        self._tried_sql: set[str] = set()   # dedup guard for run_sql
+
+    def _resolve_table(self, name: str):
+        """Find a TableInfo by bare name or schema-qualified name (case-insensitive)."""
+        nl = name.lower().strip('"')
+        for t in self._schema.tables:
+            fqn = f"{t.schema}.{t.name}".lower() if t.schema else t.name.lower()
+            if t.name.lower() == nl or fqn == nl:
+                return t
+        return None
+
+    @staticmethod
+    def _table_fqn(tbl) -> str:
+        """Return the SQL-safe fully-qualified table reference for a TableInfo."""
+        if tbl.schema:
+            return f'"{tbl.schema}"."{tbl.name}"'
+        return f'"{tbl.name}"'
 
     @staticmethod
     def _extract_tables(sql: str) -> list[str]:
