@@ -188,6 +188,16 @@ class TalonSight:
         )
         self.business_model = BusinessModel(_conn_id)
 
+        # Data profiler — runs lightweight column profiling queries at connect time.
+        # Builds category distributions, numeric ranges, date spans; injected into
+        # every agent system prompt so the LLM never needs get_sample_data for basics.
+        from talonsight.profiler import DataProfiler
+        self.data_profiler = DataProfiler(self._db, self.schema_context, self.schema_graph)
+        try:
+            self.data_profiler.run()
+        except Exception:
+            pass  # profiler failure must never block a connection
+
         # Schema string for agent mode — built once, reused for every question.
         # Populated lazily on the first ask_agent() call; uses the already-
         # introspected schema_context so no DB round-trip is needed.
@@ -465,6 +475,11 @@ class TalonSight:
         graph_ctx = self.schema_graph.to_agent_context()
         if graph_ctx:
             lines.append(f"\n{graph_ctx}")
+
+        # Append data profile: value distributions, numeric ranges, date spans
+        profile_ctx = self.data_profiler.to_agent_context()
+        if profile_ctx:
+            lines.append(f"\n{profile_ctx}")
 
         return "\n".join(lines)
 

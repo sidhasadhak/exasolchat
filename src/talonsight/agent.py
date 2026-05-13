@@ -744,9 +744,11 @@ class AgentLoop:
         if self._schema_str:
             schema_block = f"\n{self._schema_str}\n"
             schema_instruction = (
-                "The full schema is provided above — you already know every table and column. "
-                "Do NOT call list_tables or get_schema. "
-                "Start with create_plan, then go straight to get_sample_data or run_sql."
+                "The full schema AND data profile are provided above — you already know "
+                "every table, column, value distribution, and numeric range. "
+                "Do NOT call list_tables, get_schema, get_sample_data, or get_column_stats "
+                "unless you need something not covered above. "
+                "Start with create_plan, then go straight to run_sql."
             )
         else:
             schema_block = ""

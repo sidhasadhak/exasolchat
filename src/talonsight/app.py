@@ -1994,6 +1994,45 @@ with tab_intelligence:
                 else:
                     st.caption("No findings yet.")
 
+        # ── Data Profile section ───────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 🔬 Data Profile")
+        st.caption("Column distributions and ranges captured at connect time — injected into every agent prompt.")
+        _i_prof = _i_chat.data_profiler.to_dict()
+        if not _i_prof:
+            st.caption("No profile available.")
+        else:
+            for _tp_name, _tp in _i_prof.items():
+                with st.expander(
+                    f'**{_tp["fqn"]}** — {_tp["row_count"]:,} rows · '
+                    f'{len(_tp["columns"])} profiled columns',
+                    expanded=False,
+                ):
+                    for _cp in _tp["columns"]:
+                        _cp_parts = []
+                        if _cp.get("top_values"):
+                            _cp_parts.append(
+                                " · ".join(f'{v}({n})' for v, n in _cp["top_values"][:5])
+                            )
+                        elif _cp.get("min") and _cp.get("max"):
+                            _rng = f'{_cp["min"]} → {_cp["max"]}'
+                            if _cp.get("avg"):
+                                _rng += f', avg {_cp["avg"]}'
+                            _cp_parts.append(_rng)
+                        if _cp.get("null_pct", 0) > 10:
+                            _cp_parts.append(f'{_cp["null_pct"]:.0f}% null')
+                        _cp_str = "  ·  ".join(_cp_parts)
+                        if _cp_str:
+                            st.markdown(
+                                f'<div style="display:flex;gap:12px;padding:3px 0;'
+                                f'border-bottom:1px solid #1e2d40">'
+                                f'<span style="color:#6366f1;font-size:.76rem;'
+                                f'min-width:180px;font-weight:500">{_cp["name"]}</span>'
+                                f'<span style="color:#64748b;font-size:.74rem">{_cp_str}</span>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+
 # ── BUILD tab ─────────────────────────────────────────────────────────
 with tab_build:
     # If "Open in Builder" was clicked in the Ask tab, seed the builder
