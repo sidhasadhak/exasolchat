@@ -1890,6 +1890,106 @@ with tab_schema:
     tables = chat_engine.schema_context.tables
     jmap   = get_join_map(tables)
 
+    # ── Schema Intelligence panel ──────────────────────────────────────
+    _graph = chat_engine.schema_graph
+    _gd    = _graph.to_dict()
+
+    _domain_colours = {
+        "e-commerce": "#f97316", "saas": "#6366f1", "finance": "#10b981",
+        "hr": "#ec4899", "healthcare": "#06b6d4", "logistics": "#84cc16",
+        "analytics": "#a855f7", "general": "#64748b", "unknown": "#64748b",
+    }
+    _domain = _gd.get("domain", "unknown")
+    _domain_col = _domain_colours.get(_domain, "#64748b")
+    _domain_label = _domain.replace("-", " ").title()
+    _conf_pct = int(_gd.get("domain_confidence", 0) * 100)
+
+    st.markdown(
+        f"""
+        <div style="
+            background: #1a2236;
+            border: 1px solid #2d3a50;
+            border-radius: 10px;
+            padding: 16px 20px;
+            margin-bottom: 18px;
+        ">
+          <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px">
+            <span style="
+                background:{_domain_col}22; color:{_domain_col};
+                border:1px solid {_domain_col}55;
+                padding:3px 12px; border-radius:20px;
+                font-size:0.8rem; font-weight:600; letter-spacing:.04em;
+            ">{_domain_label}</span>
+            <span style="color:#94a3b8; font-size:0.78rem">{_conf_pct}% domain confidence</span>
+          </div>
+          <p style="color:#cbd5e1; font-size:0.85rem; margin:0">{_gd.get("summary","")}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Table role cards
+    _type_order = ["fact", "dimension", "bridge", "lookup", "unknown"]
+    _type_col   = {
+        "fact": "#f97316", "dimension": "#6366f1",
+        "bridge": "#10b981", "lookup": "#64748b", "unknown": "#334155",
+    }
+    _nodes_by_type: dict[str, list] = {t: [] for t in _type_order}
+    for _n in _gd.get("nodes", []):
+        _nodes_by_type.setdefault(_n["type"], []).append(_n)
+
+    _role_cols = st.columns(len([t for t in _type_order if _nodes_by_type[t]]))
+    _col_idx = 0
+    for _ttype in _type_order:
+        _tnodes = _nodes_by_type[_ttype]
+        if not _tnodes:
+            continue
+        _tc = _type_col[_ttype]
+        with _role_cols[_col_idx]:
+            _col_idx += 1
+            st.markdown(
+                f'<p style="color:{_tc};font-size:.75rem;font-weight:600;'
+                f'letter-spacing:.06em;margin-bottom:6px">'
+                f'{_tnodes[0]["emoji"]} {_ttype.upper()} ({len(_tnodes)})</p>',
+                unsafe_allow_html=True,
+            )
+            for _n in _tnodes:
+                _rc = f"{_n['row_count']:,}" if _n.get("row_count") else "?"
+                _measures = ", ".join(_n.get("measures", [])[:3])
+                _tip = f"measures: {_measures}" if _measures else ""
+                st.markdown(
+                    f'<div style="background:#1e2a3a;border-left:3px solid {_tc};'
+                    f'padding:6px 10px;border-radius:0 6px 6px 0;margin-bottom:5px">'
+                    f'<span style="color:#e2e8f0;font-size:.8rem;font-weight:500">'
+                    f'{_n["name"]}</span>'
+                    f'<span style="color:#64748b;font-size:.7rem;margin-left:6px">'
+                    f'{_rc} rows</span>'
+                    + (f'<br><span style="color:#475569;font-size:.68rem">{_tip}</span>'
+                       if _tip else "")
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # Join paths summary
+    _rels = _gd.get("relationships", [])
+    if _rels:
+        with st.expander(f"🔗 Detected Join Paths ({len(_rels)})", expanded=False):
+            for _r in _rels:
+                _conf = int(_r["confidence"] * 100)
+                _badge = (
+                    '<span style="color:#22c55e;font-size:.7rem">✓ inferred</span>'
+                    if _r["source"] == "name_match" else
+                    '<span style="color:#6366f1;font-size:.7rem">✓ declared</span>'
+                )
+                st.markdown(
+                    f'`{_r["from_table"]}.{_r["from_column"]}` '
+                    f'**→** `{_r["to_table"]}.{_r["to_column"]}` '
+                    f'&nbsp;{_badge}&nbsp;'
+                    f'<span style="color:#475569;font-size:.7rem">{_conf}%</span>',
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("---")
     st.markdown("### 🗺️ Schema Relationship Map")
     st.caption(
         "Auto-generated ER diagram. Solid lines = exact column-name match. "

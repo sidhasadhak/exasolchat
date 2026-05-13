@@ -173,6 +173,11 @@ class TalonSight:
         # Visual query builder — exposes schema introspection to the UI
         self.builder = QueryBuilder(self.schema_context)
 
+        # Schema intelligence graph — built once from already-introspected schema.
+        # Zero extra DB queries; used by agent context and Schema Intelligence UI.
+        from talonsight.graph import SchemaGraph
+        self.schema_graph = SchemaGraph(self.schema_context).build()
+
         # Business model — persists confirmed findings across sessions
         from talonsight.memory import BusinessModel
         _conn_id = (
@@ -438,22 +443,29 @@ class TalonSight:
     # ── Agent mode ────────────────────────────────────────────────────
 
     def _build_agent_schema_str(self) -> str:
-        """Compact schema snapshot for the agent system prompt.
+        """Compact schema snapshot + intelligence graph for the agent system prompt.
 
-        Uses the already-introspected schema_context — no database calls.
-        Called once per TalonSight session; result is cached in _agent_schema_cache.
-        Table names are fully-qualified (schema.table) when a schema is present,
-        matching exactly what must appear in SQL.
+        Combines:
+          - Full table/column listing with exact SQL-ready names
+          - Schema intelligence: table roles, measures, join paths, domain
+
+        Uses only already-introspected data — zero extra DB calls.
+        Called once per session; cached in _agent_schema_cache.
         """
         lines = ["DATABASE SCHEMA (all available tables and columns):"]
         for tbl in self.schema_context.tables:
-            # Use the same fully-qualified name the SQL must use
             fqn = f"{tbl.schema}.{tbl.name}" if tbl.schema else tbl.name
             row_info = f" ({tbl.row_count:,} rows)" if tbl.row_count else ""
             lines.append(f"\nTable: {fqn}{row_info}")
             for col in tbl.columns:
                 nullable = "" if col.nullable else "  NOT NULL"
                 lines.append(f"  {col.name}  {col.type}{nullable}")
+
+        # Append graph intelligence: domain, table roles, join paths
+        graph_ctx = self.schema_graph.to_agent_context()
+        if graph_ctx:
+            lines.append(f"\n{graph_ctx}")
+
         return "\n".join(lines)
 
     def ask_agent(
