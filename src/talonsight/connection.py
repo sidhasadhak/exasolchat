@@ -115,7 +115,21 @@ class DatabaseConnection:
             )
         else:
             from sqlalchemy import create_engine
-            self._sqla_engine = create_engine(self.config.sqlalchemy_url)
+            url = self.config.sqlalchemy_url or ""
+            # Auto-fallback: if the URL requests psycopg3 (postgresql+psycopg://)
+            # but only psycopg2 is available, retry with the psycopg2 driver.
+            try:
+                self._sqla_engine = create_engine(url)
+                # Force-validate the driver import now (lazy by default)
+                self._sqla_engine.dialect.dbapi  # triggers driver import
+            except Exception as exc:
+                if "psycopg" in str(exc).lower() and "+psycopg://" in url:
+                    fallback_url = url.replace(
+                        "postgresql+psycopg://", "postgresql+psycopg2://"
+                    )
+                    self._sqla_engine = create_engine(fallback_url)
+                else:
+                    raise
 
     @property
     def is_exasol(self) -> bool:

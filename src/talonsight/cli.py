@@ -75,6 +75,7 @@ def _wait_for_mlx(url: str, proc: "subprocess.Popen[bytes]",
 
 def main() -> None:
     from talonsight.setup_wizard import CONFIG_PATH, load_config, run_setup
+    from talonsight.preferences import Preferences
 
     _BOLD  = "\033[1m"
     _GREEN = "\033[32m"
@@ -84,11 +85,20 @@ def main() -> None:
 
     # ── Strip talonsight-specific flags before forwarding args to Streamlit ──
     args = sys.argv[1:]
-    force_setup = "--setup" in args
-    args = [a for a in args if a != "--setup"]
+    force_setup   = "--setup" in args
+    reset_setup   = "--reset-setup" in args
+    args = [a for a in args if a not in ("--setup", "--reset-setup")]
 
-    # ── First-time setup wizard ───────────────────────────────────────────
-    if force_setup or not CONFIG_PATH.exists():
+    # ── Reset onboarding so wizard shows again on next Streamlit load ────
+    if reset_setup:
+        from talonsight.hermes_bootstrap import reset_onboarding
+        reset_onboarding()
+        print(f"  {_GREEN}✓{_RST}  Setup reset — the wizard will run on next launch.\n")
+
+    # ── First-time setup: only run CLI wizard if no preferences AND forced ──
+    # Normally the Streamlit wizard handles onboarding on first launch.
+    prefs = Preferences.load()
+    if force_setup and not prefs.onboarding_complete:
         run_setup()
 
     cfg = load_config()
@@ -169,6 +179,17 @@ def main() -> None:
                         f"Check port {port} is free, then run manually:\n"
                         f"    python -m mlx_lm server --model {model} --port {port}",
                     )
+
+    # ── Analyst mode: verify hermes is ready (no persistent gateway needed) ─
+    if prefs.is_analyst and prefs.hermes_installed:
+        from talonsight.hermes_bootstrap import is_installed
+        if is_installed():
+            print(f"  {_GREEN}✓{_RST}  Analyst engine ready (hermes -z per-question mode)")
+        else:
+            print(
+                f"  {_YELL}⚠  Hermes not found — "
+                f"Analyst setup will run on first use.{_RST}\n"
+            )
 
     # ── Launch Streamlit ──────────────────────────────────────────────────
     app_path = Path(__file__).with_name("app.py")

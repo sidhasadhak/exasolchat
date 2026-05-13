@@ -112,18 +112,22 @@ class BusinessModel:
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def _load(self) -> dict:
-        if self._path.exists():
-            try:
-                return json.loads(self._path.read_text(encoding="utf-8"))
-            except Exception as exc:
-                logger.warning("Could not load business model %s: %s", self._path, exc)
-        return {
+        defaults: dict = {
             "findings": [],
             "kpis": {},               # name (lower) → KPI dict
             "domain_facts": [],
             "metric_baselines": {},   # kept for v1 compat
             "business_events": [],
         }
+        if self._path.exists():
+            try:
+                stored = json.loads(self._path.read_text(encoding="utf-8"))
+                # Merge stored data with defaults so any keys added in new
+                # versions of the schema are always present (forward-compat).
+                return {**defaults, **stored}
+            except Exception as exc:
+                logger.warning("Could not load business model %s: %s", self._path, exc)
+        return defaults
 
     def _save(self) -> None:
         try:
@@ -425,6 +429,8 @@ def extract_domain_facts(narrative: str, sql: str,
     for m in re.finditer(r"([\d,]+)\s+(customer|order|product|seller|transaction)s?", text, re.I):
         num = m.group(1).replace(",", "")
         entity = m.group(2).lower() + "s"
+        if not num or not num.isdigit():
+            continue
         if int(num) > 100:
             facts.append(DomainFact(
                 fact=f"Approximately {m.group(1)} {entity} in the dataset",

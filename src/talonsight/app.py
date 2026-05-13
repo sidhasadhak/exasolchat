@@ -28,14 +28,25 @@ from talonsight.connection import ConnectionConfig
 from talonsight.llm import OllamaBackend, OpenAICompatibleBackend, MLXBackend
 from talonsight.setup_wizard import load_config as _load_wizard_config
 from talonsight.safety import RiskLevel
+from talonsight.preferences import Preferences
 
 load_dotenv()
 
 _DEFAULT_DUCKDB_PATH    = os.environ.get("EXACHAT_DUCKDB_PATH", "")
-_DEFAULT_OLLAMA_URL     = os.environ.get("EXACHAT_OLLAMA_URL", "http://localhost:11434")
-_DEFAULT_OLLAMA_MODEL   = os.environ.get("EXACHAT_OLLAMA_MODEL", "qwen2.5-coder:7b")
 _DEFAULT_KB_PATH        = os.environ.get("EXACHAT_KB_PATH", "")
 _DEFAULT_METRICS_PATH   = os.environ.get("EXACHAT_METRICS_PATH", "")
+
+# LLM defaults — preferences file wins over env vars
+_prefs_early = Preferences.load()
+_DEFAULT_OLLAMA_URL   = (
+    _prefs_early.llm_url   if _prefs_early.llm_provider == "ollama"
+    else os.environ.get("EXACHAT_OLLAMA_URL", "http://localhost:11434")
+)
+_DEFAULT_OLLAMA_MODEL = (
+    _prefs_early.llm_model if _prefs_early.llm_provider == "ollama"
+    else os.environ.get("EXACHAT_OLLAMA_MODEL", "qwen2.5-coder:7b")
+)
+del _prefs_early
 
 
 # ── Page config ──────────────────────────────────────────────────────
@@ -45,6 +56,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Onboarding gate — shown once on first launch ─────────────────────
+_prefs = Preferences.load()
+if not _prefs.onboarding_complete:
+    from talonsight.onboarding import render_onboarding_wizard
+    render_onboarding_wizard()   # calls st.stop() — nothing below runs
 
 # ── Custom styles — Claude-inspired palette ───────────────────────────
 st.markdown("""
@@ -764,9 +781,14 @@ def _render_result(r: QueryResult, elapsed: float | None = None):
             )
 
         if elapsed is not None:
+            _agent_label = (
+                "🧠 Hermes Analyst"
+                if len(r.agent_steps) == 0
+                else f"🧠 Agent · {len(r.agent_steps)} steps"
+            )
             st.markdown(
                 f'<div style="font-size:0.82rem;color:#a4a4ad;margin:4px 0 12px;">'
-                f'🧠 Agent · {len(r.agent_steps)} steps · ⏱ {elapsed:.1f}s</div>',
+                f'{_agent_label} · ⏱ {elapsed:.1f}s</div>',
                 unsafe_allow_html=True,
             )
 
@@ -1285,6 +1307,15 @@ with st.sidebar:
             st.session_state.pending_question = None
             st.session_state.explore_questions = None  # None = pending generation
 
+            # ── Persist connection so talonsight-mcp (Hermes Analyst) can reconnect ──
+            try:
+                import dataclasses
+                _prefs_save = Preferences.load()
+                _prefs_save.last_connection = dataclasses.asdict(config)
+                _prefs_save.save()
+            except Exception:
+                pass  # non-fatal — analyst mode will warn on first use
+
             st.success(
                 f"Connected! {len(chat.schema_context.tables)} tables "
                 f"({chat.schema_context.dialect})"
@@ -1423,37 +1454,25 @@ with st.sidebar:
                 "Switch to **Ollama** for semantic embeddings via `nomic-embed-text`."
             )
 
-    # ── 6. AGENT MODE ────────────────────────────────────────────────
-    with st.expander("🧠 Agent Mode", expanded=False):
-        st.toggle(
-            "Enable Agent Mode",
-            key="_sb_agent_mode",
-            value=False,
-            help=(
-                "Agent mode runs a multi-step autonomous investigation instead of "
-                "a single SQL query. The agent plans, explores the schema, executes "
-                "iterative queries, and synthesises a narrative answer.\n\n"
-                "⚡ Recommended models: qwen3.5:9b, hermes3, llama3.1\n"
-                "📥 Install: ollama pull qwen3.5:9b"
-            ),
+    # ── 6. MODE INDICATOR ────────────────────────────────────────────
+    _mode_prefs = Preferences.load()
+    if _mode_prefs.is_analyst:
+        st.markdown(
+            '<div style="background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.3);'
+            'border-radius:6px;padding:8px 12px;font-size:0.82rem;color:#a4a4ad;">'
+            '🧠 <b style="color:#6366f1;">Analyst mode</b> — Hermes Agent investigates '
+            'every question autonomously using your database.'
+            '</div>',
+            unsafe_allow_html=True,
         )
-        if st.session_state.get("_sb_agent_mode"):
-            st.caption(
-                "🧠 **Agent mode active** — each question triggers a full investigation "
-                "(5–12 tool calls, ~30–60s on 8B models).  \n"
-                "Best models: `qwen3.5:9b` · `hermes3` · `llama3.1:8b`"
-            )
-            st.slider(
-                "Max investigation steps",
-                min_value=6,
-                max_value=20,
-                value=12,
-                step=1,
-                key="_sb_agent_max_steps",
-                help="Hard cap on tool calls per investigation. Higher = more thorough, slower.",
-            )
-        else:
-            st.caption("Off — uses classic one-shot SQL generation.")
+    else:
+        st.markdown(
+            '<div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);'
+            'border-radius:6px;padding:8px 12px;font-size:0.82rem;color:#a4a4ad;">'
+            '💬 <b style="color:#e2e2e5;">Assistant mode</b> — direct SQL generation.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── 7. KNOWLEDGE BASE ─────────────────────────────────────────────
     with st.expander("📖 Knowledge Base", expanded=False):
@@ -1801,41 +1820,58 @@ with tab_ask:
         st.session_state.messages.append({"role": "user", "content": question})
 
         _status = st.empty()
-        _agent_mode = st.session_state.get("_sb_agent_mode", False)
 
-        if _agent_mode:
-            # ── Agent mode — multi-step investigation ─────────────────
-            _status.markdown(
-                '<div style="color:#a4a4ad;font-size:0.85rem;">🧠 Planning investigation…</div>',
-                unsafe_allow_html=True,
-            )
-            _trace_placeholder = st.empty()
-            _step_lines: list[str] = []
+        # Route: Analyst mode → Hermes -z; Assistant mode → classic SQL
+        _route_prefs = Preferences.load()
+        _use_hermes = _route_prefs.is_analyst and _route_prefs.hermes_installed
 
-            def _on_agent_step(step) -> None:
-                icon = "✓" if not step.error else "✗"
-                elapsed_s = f"{step.elapsed_ms/1000:.1f}s" if step.elapsed_ms >= 1000 else f"{step.elapsed_ms}ms"
-                _step_lines.append(
-                    f"Step {step.step_num} &nbsp;·&nbsp; `{step.tool_name}` &nbsp;·&nbsp; "
-                    f"{elapsed_s} &nbsp; {icon}"
+        if _use_hermes:
+            # ── Analyst mode — Hermes Agent via hermes -z ─────────────
+            from talonsight.hermes_bootstrap import ask_hermes
+            from talonsight.safety import RiskLevel, SafetyVerdict
+
+            # Live progress log — stays visible until the answer arrives
+            _progress_placeholder = st.empty()
+            _progress_lines: list[str] = []
+
+            def _on_hermes_progress(msg: str) -> None:
+                _progress_lines.append(msg)
+                # Render as a neat step-by-step log
+                lines_html = "".join(
+                    f'<div style="padding:2px 0">{line}</div>'
+                    for line in _progress_lines
                 )
-                _trace_placeholder.markdown(
-                    '<div style="color:#a4a4ad;font-size:0.82rem;line-height:1.7">'
-                    + "<br>".join(_step_lines)
-                    + "</div>",
+                _progress_placeholder.markdown(
+                    '<div style="background:rgba(255,255,255,0.03);border:1px solid '
+                    'rgba(255,255,255,0.06);border-radius:8px;padding:12px 16px;'
+                    'font-size:0.82rem;color:#a4a4ad;line-height:1.8;">'
+                    + lines_html
+                    + '</div>',
                     unsafe_allow_html=True,
                 )
 
+            _status.markdown(
+                '<div style="color:#6366f1;font-size:0.85rem;font-weight:600;">'
+                '🧠 Hermes Agent investigating…</div>',
+                unsafe_allow_html=True,
+            )
             _t0 = time.perf_counter()
-            _max_steps = st.session_state.get("_sb_agent_max_steps", 12)
-            result = chat_engine.ask_agent(
+            _hermes_answer = ask_hermes(
                 question,
-                on_step=_on_agent_step,
-                max_steps=_max_steps,
+                output_cb=_on_hermes_progress,
+                history=st.session_state.get("messages", []),
             )
             _elapsed = time.perf_counter() - _t0
             _status.empty()
-            _trace_placeholder.empty()
+            _progress_placeholder.empty()
+
+            result = QueryResult(
+                question=question,
+                sql="",
+                safety=SafetyVerdict(RiskLevel.SAFE, "", "hermes"),
+                summary=_hermes_answer,
+                agent_steps=[],   # non-None triggers agent layout in _render_result
+            )
 
         else:
             # ── Classic mode — one-shot SQL generation ─────────────────
@@ -1894,8 +1930,8 @@ with tab_intelligence:
             unsafe_allow_html=True,
         )
         st.caption(
-            "Everything talonsight has learned about your data. "
-            "Grows automatically with every Agent Mode investigation."
+            "Everything TalonSight has learned about your data. "
+            "Grows automatically with every Analyst investigation."
         )
         st.markdown("---")
 
@@ -1908,7 +1944,7 @@ with tab_intelligence:
                 '<div style="text-align:center;padding:60px 0;color:#475569">'
                 '<div style="font-size:2rem;margin-bottom:12px">🧠</div>'
                 '<div style="font-size:1rem;font-weight:600;color:#64748b">No knowledge yet</div>'
-                '<div style="font-size:.85rem;margin-top:6px">Ask questions in Agent Mode.<br>'
+                '<div style="font-size:.85rem;margin-top:6px">Ask questions in Analyst mode.<br>'
                 'Every confirmed answer enriches this knowledge base.</div>'
                 '</div>',
                 unsafe_allow_html=True,

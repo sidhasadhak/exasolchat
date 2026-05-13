@@ -27,27 +27,30 @@ dependencies = [
     "plotly>=5.18",
     "altair>=5.2",
     "pandas>=2.0",
+    "tabulate>=0.9",
     "httpx>=0.25",
     "chromadb>=0.4",
     "python-dotenv>=1.0",
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
 exasol     = ["pyexasol>=0.25", "sqlalchemy-exasol>=5.0"]
-postgres   = ["psycopg2-binary>=2.9"]
+postgres   = ["psycopg2-binary>=2.9", "psycopg[binary]>=3.1"]
 mysql      = ["pymysql>=1.1"]
 # mlx-lm only installs on Apple Silicon (arm64 macOS); skipped silently elsewhere
 mlx        = ["mlx-lm>=0.22; sys_platform=='darwin' and platform_machine=='arm64'"]
 all        = [
     "pyexasol>=0.25", "sqlalchemy-exasol>=5.0",
-    "psycopg2-binary>=2.9",
+    "psycopg2-binary>=2.9", "psycopg[binary]>=3.1",
     "pymysql>=1.1",
     "mlx-lm>=0.22; sys_platform=='darwin' and platform_machine=='arm64'",
 ]
 dev        = ["pytest>=7.0", "ruff>=0.1"]
 
 [project.scripts]
-talonsight = "talonsight.cli:main"
+talonsight     = "talonsight.cli:main"
+talonsight-mcp = "talonsight.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

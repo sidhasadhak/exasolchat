@@ -663,12 +663,13 @@ class AgentLoop:
         if not sql:
             return "sql argument is required."
 
-        # Hard stop — if we already have a successful result, don't run more SQL.
-        # The model must call final_answer with what it already has.
+        # Hard stop — if we already have a successful result, force-complete now.
+        # The model keeps ignoring ⛔ STOP messages, so auto-synthesize final_answer.
         if self._has_result:
+            self._auto_final_answer()
             return (
-                "⛔ STOP: You already retrieved data successfully in a previous step. "
-                "Do NOT run more SQL. Call final_answer RIGHT NOW using the data you already have."
+                "⛔ STOP: You already retrieved data successfully. "
+                "Investigation auto-completed — do not call any more tools."
             )
 
         # Dedup guard — if this exact SQL was already tried, refuse to repeat it
@@ -805,6 +806,39 @@ RULES:
 - Do NOT keep looping after you have data. One successful run_sql → final_answer."""
 
     # ── Helpers ───────────────────────────────────────────────────────
+
+    def _auto_final_answer(self) -> None:
+        """Force-complete investigation when the model ignores ⛔ STOP signals.
+
+        Builds a minimal narrative from the DataFrame already in memory so the
+        loop can exit cleanly without another LLM round-trip.
+        """
+        if self._done:
+            return
+        df = self._last_df
+        sql = self._last_sql or ""
+
+        if df is not None and not df.empty:
+            rows = len(df)
+            cols = list(df.columns)
+            # Try to build a meaningful single-line summary from the top row
+            try:
+                top = df.iloc[0].to_dict()
+                summary_parts = [f"{k}: {v}" for k, v in list(top.items())[:4]]
+                summary = "; ".join(summary_parts)
+            except Exception:
+                summary = f"{rows} row(s) returned"
+            narrative = (
+                f"The query returned {rows} row(s) across {len(cols)} column(s) "
+                f"({', '.join(cols[:5])}{'…' if len(cols) > 5 else ''}). "
+                f"Top result — {summary}."
+            )
+        else:
+            narrative = "No data was retrieved. The query executed but returned zero rows."
+
+        logger.info("AgentLoop: auto-synthesizing final_answer after model ignored stop signal.")
+        self._final_narrative = narrative
+        self._done = True
 
     def _reset_state(self) -> None:
         self._done = False
