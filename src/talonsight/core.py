@@ -183,6 +183,11 @@ class TalonSight:
         )
         self.business_model = BusinessModel(_conn_id)
 
+        # Schema string for agent mode — built once, reused for every question.
+        # Populated lazily on the first ask_agent() call; uses the already-
+        # introspected schema_context so no DB round-trip is needed.
+        self._agent_schema_cache: Optional[str] = None
+
         self._history: list[QueryResult] = []
 
     @property
@@ -432,6 +437,21 @@ class TalonSight:
 
     # ── Agent mode ────────────────────────────────────────────────────
 
+    def _build_agent_schema_str(self) -> str:
+        """Compact schema snapshot for the agent system prompt.
+
+        Uses the already-introspected schema_context — no database calls.
+        Called once per TalonSight session; result is cached in _agent_schema_cache.
+        """
+        lines = ["DATABASE SCHEMA (all available tables and columns):"]
+        for tbl in self.schema_context.tables:
+            row_info = f" ({tbl.row_count:,} rows)" if tbl.row_count else ""
+            lines.append(f"\nTable: {tbl.name}{row_info}")
+            for col in tbl.columns:
+                nullable = "" if col.nullable else "  NOT NULL"
+                lines.append(f"  {col.name}  {col.type}{nullable}")
+        return "\n".join(lines)
+
     def ask_agent(
         self,
         question: str,
@@ -455,6 +475,11 @@ class TalonSight:
         """
         from talonsight.agent import AgentLoop
 
+        # Build schema string once per session — no DB call, just formats
+        # the already-introspected schema_context into a compact string.
+        if self._agent_schema_cache is None:
+            self._agent_schema_cache = self._build_agent_schema_str()
+
         loop = AgentLoop(
             connector=self._db,
             schema_context=self.schema_context,
@@ -465,6 +490,7 @@ class TalonSight:
             allowed_schemas=list(self._allowed_schemas) if self._allowed_schemas else [],
             allowed_tables=list(self._allowed_tables) if self._allowed_tables else [],
             max_steps=max_steps,
+            schema_str=self._agent_schema_cache,
         )
 
         ar = loop.run_sync(question, on_step=on_step)

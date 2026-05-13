@@ -318,6 +318,7 @@ class AgentLoop:
         allowed_schemas: Optional[list[str]] = None,
         allowed_tables: Optional[list[str]] = None,
         max_steps: int = MAX_STEPS,
+        schema_str: str = "",
     ) -> None:
         self._connector = connector
         self._schema = schema_context
@@ -329,6 +330,9 @@ class AgentLoop:
         self._allowed_tables = allowed_tables or []
         self._max_steps = max_steps
         self._caps = AgentCapabilities(self)
+        # Pre-built schema string injected into every system prompt.
+        # Empty string = agent must discover schema via tools (cold start fallback).
+        self._schema_str = schema_str
 
         # Investigation state — reset on each run()
         self._done: bool = False
@@ -715,14 +719,30 @@ class AgentLoop:
             if past_context else ""
         )
         dialect_name = self._dialect or "SQL"
+
+        # Schema is pre-built from introspection — inject it so the agent starts
+        # knowing all tables/columns and can skip list_tables / get_schema entirely.
+        if self._schema_str:
+            schema_block = f"\n{self._schema_str}\n"
+            schema_instruction = (
+                "The full schema is provided above — you already know every table and column. "
+                "Do NOT call list_tables or get_schema. "
+                "Start with create_plan, then go straight to get_sample_data or run_sql."
+            )
+        else:
+            schema_block = ""
+            schema_instruction = (
+                "Call list_tables or get_schema to understand the available data."
+            )
+
         return f"""You are an autonomous data analyst with access to a database via tools.
 Investigate questions step-by-step using the provided tools, then call final_answer with your findings.
 DATABASE DIALECT: {dialect_name}
-{past_block}
+{schema_block}{past_block}
 STEPS:
 1. Call create_plan with your investigation steps first.
-2. Call list_tables or get_schema to understand available data.
-3. Call get_sample_data before filtering on text/category columns.
+2. {schema_instruction}
+3. Call get_sample_data before filtering on text/category columns to understand value formats.
 4. Call run_sql to execute queries — read errors and retry on failure.
 5. Call final_answer with a 2-4 sentence plain-English narrative when done.
 
